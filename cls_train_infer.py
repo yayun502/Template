@@ -1,5 +1,5 @@
 """
-YOLOv8 Classification Training + Inference + Metrics
+YOLOv8 Classification Training + Inference + Metrics (with Threshold Tuning)
 
 Assumes dataset already converted to:
 
@@ -15,13 +15,16 @@ This script contains:
 1. train()  -> train YOLOv8 classification model
 2. infer_and_evaluate() -> run inference + compute TP/FP/TN/FN
 
-Install:
-pip install ultralytics scikit-learn
+With:
+- Threshold-based classification (instead of pure argmax)
+- Automatic best threshold search (maximize F1 or Recall)
+
 """
 
 import os
+import numpy as np
 from ultralytics import YOLO
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix, classification_report, precision_recall_curve
 
 # =========================
 # CONFIG
@@ -31,7 +34,6 @@ MODEL_NAME = "yolov8n-cls.pt"
 TRAIN_EPOCHS = 100
 IMG_SIZE = 224
 
-# class mapping (IMPORTANT)
 CLASS_NAMES = ["normal", "defect"]
 CLASS_TO_ID = {"normal": 0, "defect": 1}
 
@@ -46,8 +48,6 @@ def train():
         data=DATASET_DIR,
         epochs=TRAIN_EPOCHS,
         imgsz=IMG_SIZE,
-
-        # augmentation
         fliplr=0.5,
         flipud=0.5,
         degrees=10,
@@ -57,9 +57,8 @@ def train():
         hsv_v=0.4,
     )
 
-
 # =========================
-# INFERENCE + METRICS
+# DATA LOADER
 # =========================
 
 def get_image_paths(split="val"):
@@ -78,26 +77,69 @@ def get_image_paths(split="val"):
 
     return image_paths, gt_labels
 
+# =========================
+# THRESHOLD SEARCH
+# =========================
 
-def infer_and_evaluate(model_path, split="val"):
+def find_best_threshold(gt, probs, mode="f1"):
+    precision, recall, thresholds = precision_recall_curve(gt, probs)
+
+    f1_scores = 2 * precision * recall / (precision + recall + 1e-6)
+
+    if mode == "f1":
+        idx = np.argmax(f1_scores)
+    elif mode == "recall":
+        idx = np.argmax(recall)
+    else:
+        raise ValueError("mode must be 'f1' or 'recall'")
+
+    best_threshold = thresholds[max(idx - 1, 0)]
+
+    print(f"\n[Best Threshold Search]")
+    print(f"Mode: {mode}")
+    print(f"Best threshold: {best_threshold:.4f}")
+    print(f"Precision: {precision[idx]:.4f}, Recall: {recall[idx]:.4f}, F1: {f1_scores[idx]:.4f}")
+
+    return best_threshold
+
+# =========================
+# INFERENCE + METRICS
+# =========================
+
+def infer_and_evaluate(model_path, split="val", threshold=None, auto_threshold=False, mode="f1"):
     model = YOLO(model_path)
 
     image_paths, gt_labels = get_image_paths(split)
 
-    preds = []
+    probs = []
 
     for img_path in image_paths:
         results = model.predict(img_path, verbose=False)
 
-        # top-1 prediction
-        pred_class = int(results[0].probs.top1)
-        preds.append(pred_class)
+        # probability of defect (class 1)
+        prob_defect = float(results[0].probs.data[1])
+        probs.append(prob_defect)
+
+    probs = np.array(probs)
+    gt_labels = np.array(gt_labels)
+
+    # =========================
+    # AUTO THRESHOLD
+    # =========================
+    if auto_threshold:
+        threshold = find_best_threshold(gt_labels, probs, mode)
+
+    if threshold is None:
+        threshold = 0.5
+
+    print(f"\nUsing threshold: {threshold:.4f}")
+
+    preds = (probs >= threshold).astype(int)
 
     # =========================
     # METRICS
     # =========================
     cm = confusion_matrix(gt_labels, preds)
-
     tn, fp, fn, tp = cm.ravel()
 
     print("\nConfusion Matrix:")
@@ -106,18 +148,19 @@ def infer_and_evaluate(model_path, split="val"):
     print("\nTP, FP, TN, FN:")
     print(f"TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn}")
 
-    print("\nDerived Metrics:")
     precision = tp / (tp + fp + 1e-6)
     recall = tp / (tp + fn + 1e-6)
     accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-6)
+    f1 = 2 * precision * recall / (precision + recall + 1e-6)
 
+    print("\nDerived Metrics:")
     print(f"Precision: {precision:.4f}")
     print(f"Recall: {recall:.4f}")
+    print(f"F1: {f1:.4f}")
     print(f"Accuracy: {accuracy:.4f}")
 
     print("\nClassification Report:")
     print(classification_report(gt_labels, preds, target_names=CLASS_NAMES))
-
 
 # =========================
 # MAIN
@@ -129,10 +172,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["train", "eval"], required=True)
     parser.add_argument("--model", type=str, default="runs/classify/train/weights/best.pt")
+    parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--auto_threshold", action="store_true")
+    parser.add_argument("--opt_mode", choices=["f1", "recall"], default="f1")
 
     args = parser.parse_args()
 
     if args.mode == "train":
         train()
     elif args.mode == "eval":
-        infer_and_evaluate(args.model)
+        infer_and_evaluate(
+            model_path=args.model,
+            threshold=args.threshold,
+            auto_threshold=args.auto_threshold,
+            mode=args.opt_mode
+        )
+
