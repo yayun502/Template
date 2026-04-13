@@ -69,16 +69,7 @@ NP
   ]
 }
 ```
-### requirement
-```
-torch
-torchvision
-timm
-numpy
-pillow
-scikit-learn
-tqdm
-```
+
 # Train
 ```bash
 python train.py
