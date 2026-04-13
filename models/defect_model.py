@@ -6,6 +6,7 @@ import timm
 class ImageEncoder(nn.Module):
     def __init__(self, model_name="convnext_tiny", pretrained=True, out_dim=256):
         super().__init__()
+        # 先用 timm backbone，例如 convnext_tiny、resnet50、efficientnet_b0 都行
         self.backbone = timm.create_model(
             model_name,
             pretrained=pretrained,
@@ -16,7 +17,9 @@ class ImageEncoder(nn.Module):
         self.proj = nn.Linear(in_dim, out_dim)
 
     def forward(self, x):
+        # backbone 抽 feature
         feat = self.backbone(x)   # [B, in_dim]
+        # 線性層投影到固定維度
         feat = self.proj(feat)    # [B, out_dim]
         return feat
 
@@ -24,6 +27,9 @@ class ImageEncoder(nn.Module):
 class AttentionPooling(nn.Module):
     def __init__(self, feat_dim=256, hidden_dim=128):
         super().__init__()
+        # 把多張圖融合成一個 feature
+        # 假設同一個 sample 有 6 張 low-FOV 圖，模型不一定要平均看待。
+        # Attention pooling 會自動學：哪些圖比較重要、哪些圖可以忽略（比投票或平均分數更合理）
         self.attn = nn.Sequential(
             nn.Linear(feat_dim, hidden_dim),
             nn.ReLU(),
@@ -88,6 +94,9 @@ class DefectClassifier(nn.Module):
         return feats
 
     def forward(self, local_imgs, global_imgs, local_mask=None, global_mask=None):
+        # local_imgs: 同一個 sample 裡所有 FOV <= 29 的圖
+        # global_imgs: 同一個 sample 裡所有 FOV > 29 的圖
+        # ==> 每個 sample 張數不同，就用 padding + mask 解
         local_feats = self.encode_views(local_imgs)
         global_feats = self.encode_views(global_imgs)
 
