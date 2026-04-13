@@ -112,7 +112,10 @@ class DefectSampleDataset(Dataset):
 
         if len(local_imgs) == 0 or len(global_imgs) == 0:
             raise ValueError(f"Sample {sample_dir} has no valid images.")
-
+            
+        # sample 有時候：local 只有 1 張，有時候 8 張，global 也是浮動很多
+        # 目前：超過上限就只取前 max_num 張、不足就 padding
+        # 以後：拍攝順序選圖、乾脆保留更多張再改模型
         local_imgs, local_mask = self._pad_images(local_imgs, self.max_local)
         global_imgs, global_mask = self._pad_images(global_imgs, self.max_global)
 
