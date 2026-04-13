@@ -97,6 +97,8 @@ class DefectClassifier(nn.Module):
         # local_imgs: 同一個 sample 裡所有 FOV <= 29 的圖
         # global_imgs: 同一個 sample 裡所有 FOV > 29 的圖
         # ==> 每個 sample 張數不同，就用 padding + mask 解
+        # 現在：local branch 和 global branch 是共用 backbone
+        # 以後：改成 self.local_encoder/self.global_encoder 兩支獨立學
         local_feats = self.encode_views(local_imgs)
         global_feats = self.encode_views(global_imgs)
 
