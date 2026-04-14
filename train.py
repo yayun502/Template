@@ -1,4 +1,5 @@
 import os
+import csv
 from tqdm import tqdm
 
 import torch
@@ -9,15 +10,40 @@ from configs.config import (
     TRAIN_DIR, VAL_DIR, LABEL_MAP, IDX2LABEL,
     IMAGE_SIZE, MAX_LOCAL_VIEWS, MAX_GLOBAL_VIEWS, LOCAL_FOV_THRESHOLD,
     NUM_WORKERS, BATCH_SIZE,
-    BACKBONE_NAME, FEAT_DIM, NUM_CLASSES, NUM_ATTRS,
+    BACKBONE_TYPE, BACKBONE_NAME, LOCAL_PRETRAINED_PATH,
+    FEAT_DIM, NUM_CLASSES, NUM_ATTRS,
     EPOCHS, LR, WEIGHT_DECAY, ATTR_LOSS_WEIGHT, DEVICE,
-    SAVE_DIR, BEST_MODEL_NAME, LAST_MODEL_NAME
+    SAVE_DIR, BEST_MODEL_NAME, LAST_MODEL_NAME,
+    LOG_DIR, TRAIN_LOG_CSV
 )
 from data.dataset import DefectSampleDataset, get_sample_dirs
 from models.defect_model import DefectClassifier
 from utils.losses import compute_total_loss
 from utils.metrics import compute_classification_metrics
 from utils.seed import set_seed
+
+
+def init_train_log(csv_path):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    if not os.path.exists(csv_path):
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "epoch",
+                "train_loss",
+                "train_cls_loss",
+                "train_attr_loss",
+                "val_loss",
+                "val_cls_loss",
+                "val_attr_loss",
+                "val_acc"
+            ])
+
+
+def append_train_log(csv_path, row):
+    with open(csv_path, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(row)
 
 
 def train_one_epoch(model, loader, optimizer, device, attr_loss_weight):
@@ -117,7 +143,10 @@ def evaluate(model, loader, device, attr_loss_weight):
 
 def main():
     set_seed(42)
+
     os.makedirs(SAVE_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
+    init_train_log(TRAIN_LOG_CSV)
 
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
 
@@ -161,11 +190,13 @@ def main():
     )
 
     model = DefectClassifier(
+        backbone_type=BACKBONE_TYPE,
         backbone_name=BACKBONE_NAME,
+        pretrained=(BACKBONE_TYPE == "timm"),
+        pretrained_path=LOCAL_PRETRAINED_PATH if BACKBONE_TYPE == "resnet50_local" else None,
         feat_dim=FEAT_DIM,
         num_classes=NUM_CLASSES,
-        num_attrs=NUM_ATTRS,
-        pretrained=True
+        num_attrs=NUM_ATTRS
     ).to(device)
 
     optimizer = AdamW(
@@ -204,7 +235,17 @@ def main():
         print("Confusion Matrix:")
         print(val_stats["metrics"]["confusion_matrix"])
 
-        # save last
+        append_train_log(TRAIN_LOG_CSV, [
+            epoch,
+            train_stats["loss"],
+            train_stats["cls_loss"],
+            train_stats["attr_loss"],
+            val_stats["loss"],
+            val_stats["cls_loss"],
+            val_stats["attr_loss"],
+            val_acc
+        ])
+
         last_path = os.path.join(SAVE_DIR, LAST_MODEL_NAME)
         torch.save({
             "epoch": epoch,
@@ -213,7 +254,6 @@ def main():
             "val_acc": val_acc
         }, last_path)
 
-        # save best
         if val_acc > best_acc:
             best_acc = val_acc
             best_path = os.path.join(SAVE_DIR, BEST_MODEL_NAME)
