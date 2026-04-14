@@ -13,7 +13,6 @@ LABEL_MAP = {
     "定點": 2,
     "Multi": 3
 }
-
 IDX2LABEL = {v: k for k, v in LABEL_MAP.items()}
 
 # ========= Image / Loader =========
@@ -26,7 +25,15 @@ NUM_WORKERS = 4
 BATCH_SIZE = 8
 
 # ========= Model =========
+# 可選: "resnet50_local" 或 "timm"
+BACKBONE_TYPE = "resnet50_local"
+
+# 如果是 timm 模式才會用到
 BACKBONE_NAME = "convnext_tiny"
+
+# 如果是本地 resnet50 權重模式，請填你的 .pth 路徑
+LOCAL_PRETRAINED_PATH = "./pretrained/resnet50.pth"
+
 FEAT_DIM = 256
 NUM_CLASSES = 4
 NUM_ATTRS = 4   # has_np, repetitive, breakpoint, single_structure
@@ -42,3 +49,12 @@ DEVICE = "cuda"
 SAVE_DIR = "./checkpoints"
 BEST_MODEL_NAME = "best_model.pt"
 LAST_MODEL_NAME = "last_model.pt"
+
+# ========= Logging =========
+LOG_DIR = "./logs"
+TRAIN_LOG_CSV = os.path.join(LOG_DIR, "train_log.csv")
+
+# ========= Inference =========
+INFER_DIR = "./inference_outputs"
+TEST_PRED_CSV = os.path.join(INFER_DIR, "test_predictions.csv")
+TEST_CM_PNG = os.path.join(INFER_DIR, "test_confusion_matrix.png")
