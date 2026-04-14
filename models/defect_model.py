@@ -1,35 +1,75 @@
+import os
 import torch
 import torch.nn as nn
 import timm
+from torchvision import models
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self, model_name="convnext_tiny", pretrained=True, out_dim=256):
+    def __init__(
+        self,
+        backbone_type="resnet50_local",
+        model_name="convnext_tiny",
+        pretrained=True,
+        pretrained_path=None,
+        out_dim=256
+    ):
         super().__init__()
-        # 先用 timm backbone，例如 convnext_tiny、resnet50、efficientnet_b0 都行
-        self.backbone = timm.create_model(
-            model_name,
-            pretrained=pretrained,
-            num_classes=0,
-            global_pool="avg"
-        )
-        in_dim = self.backbone.num_features
-        self.proj = nn.Linear(in_dim, out_dim)
+
+        self.backbone_type = backbone_type
+
+        if backbone_type == "resnet50_local":
+            backbone = models.resnet50(weights=None)
+
+            if pretrained_path is not None and os.path.exists(pretrained_path):
+                state_dict = torch.load(pretrained_path, map_location="cpu")
+
+                # 有些 .pth 可能包成 {"state_dict": ...}
+                if isinstance(state_dict, dict) and "state_dict" in state_dict:
+                    state_dict = state_dict["state_dict"]
+
+                # 若 key 前面有 "module."，移除
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    if k.startswith("module."):
+                        k = k[len("module."):]
+                    new_state_dict[k] = v
+
+                missing, unexpected = backbone.load_state_dict(new_state_dict, strict=False)
+                print(f"[ImageEncoder] Loaded local pretrained weights from: {pretrained_path}")
+                print(f"[ImageEncoder] Missing keys: {missing}")
+                print(f"[ImageEncoder] Unexpected keys: {unexpected}")
+            else:
+                print("[ImageEncoder] No local pretrained weight loaded. Using random init.")
+
+            in_dim = backbone.fc.in_features
+            backbone.fc = nn.Identity()
+
+            self.backbone = backbone
+            self.proj = nn.Linear(in_dim, out_dim)
+
+        elif backbone_type == "timm":
+            self.backbone = timm.create_model(
+                model_name,
+                pretrained=pretrained,
+                num_classes=0,
+                global_pool="avg"
+            )
+            in_dim = self.backbone.num_features
+            self.proj = nn.Linear(in_dim, out_dim)
+
+        else:
+            raise ValueError(f"Unsupported backbone_type: {backbone_type}")
 
     def forward(self, x):
-        # backbone 抽 feature
-        feat = self.backbone(x)   # [B, in_dim]
-        # 線性層投影到固定維度
-        feat = self.proj(feat)    # [B, out_dim]
+        feat = self.backbone(x)
+        feat = self.proj(feat)
         return feat
 
 
 class AttentionPooling(nn.Module):
     def __init__(self, feat_dim=256, hidden_dim=128):
         super().__init__()
-        # 把多張圖融合成一個 feature
-        # 假設同一個 sample 有 6 張 low-FOV 圖，模型不一定要平均看待。
-        # Attention pooling 會自動學：哪些圖比較重要、哪些圖可以忽略（比投票或平均分數更合理）
         self.attn = nn.Sequential(
             nn.Linear(feat_dim, hidden_dim),
             nn.ReLU(),
@@ -46,25 +86,29 @@ class AttentionPooling(nn.Module):
         if mask is not None:
             scores = scores.masked_fill(mask == 0, -1e9)
 
-        weights = torch.softmax(scores, dim=1)  # [B, N]
-        pooled = torch.sum(feats * weights.unsqueeze(-1), dim=1)  # [B, D]
+        weights = torch.softmax(scores, dim=1)
+        pooled = torch.sum(feats * weights.unsqueeze(-1), dim=1)
         return pooled, weights
 
 
 class DefectClassifier(nn.Module):
     def __init__(
         self,
+        backbone_type="resnet50_local",
         backbone_name="convnext_tiny",
+        pretrained=True,
+        pretrained_path=None,
         feat_dim=256,
         num_classes=4,
-        num_attrs=4,
-        pretrained=True
+        num_attrs=4
     ):
         super().__init__()
 
         self.encoder = ImageEncoder(
+            backbone_type=backbone_type,
             model_name=backbone_name,
             pretrained=pretrained,
+            pretrained_path=pretrained_path,
             out_dim=feat_dim
         )
 
@@ -89,16 +133,11 @@ class DefectClassifier(nn.Module):
         """
         B, N, C, H, W = x.shape
         x = x.view(B * N, C, H, W)
-        feats = self.encoder(x)          # [B*N, D]
-        feats = feats.view(B, N, -1)     # [B, N, D]
+        feats = self.encoder(x)
+        feats = feats.view(B, N, -1)
         return feats
 
     def forward(self, local_imgs, global_imgs, local_mask=None, global_mask=None):
-        # local_imgs: 同一個 sample 裡所有 FOV <= 29 的圖
-        # global_imgs: 同一個 sample 裡所有 FOV > 29 的圖
-        # ==> 每個 sample 張數不同，就用 padding + mask 解
-        # 現在：local branch 和 global branch 是共用 backbone
-        # 以後：改成 self.local_encoder/self.global_encoder 兩支獨立學
         local_feats = self.encode_views(local_imgs)
         global_feats = self.encode_views(global_imgs)
 
