@@ -1,138 +1,153 @@
 import os
-import json
-import argparse
+import csv
 
 import torch
-from PIL import Image
-from torchvision import transforms
+import seaborn as sns
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from torch.utils.data import DataLoader
+from sklearn.metrics import confusion_matrix
 
 from configs.config import (
-    LABEL_MAP, IDX2LABEL,
+    TEST_DIR, LABEL_MAP, IDX2LABEL,
     IMAGE_SIZE, MAX_LOCAL_VIEWS, MAX_GLOBAL_VIEWS, LOCAL_FOV_THRESHOLD,
-    BACKBONE_NAME, FEAT_DIM, NUM_CLASSES, NUM_ATTRS, DEVICE
+    NUM_WORKERS, BATCH_SIZE,
+    BACKBONE_TYPE, BACKBONE_NAME, LOCAL_PRETRAINED_PATH,
+    FEAT_DIM, NUM_CLASSES, NUM_ATTRS, DEVICE,
+    SAVE_DIR, BEST_MODEL_NAME,
+    INFER_DIR, TEST_PRED_CSV, TEST_CM_PNG
 )
+from data.dataset import DefectSampleDataset, get_sample_dirs
 from models.defect_model import DefectClassifier
 
 
-def load_image(path, image_size):
-    transform = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.ToTensor(),
-    ])
-    img = Image.open(path).convert("RGB")
-    return transform(img)
+def save_confusion_matrix(cm, class_names, save_path):
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-
-def pad_images(imgs, max_num):
-    if len(imgs) == 0:
-        raise ValueError("No images to pad.")
-
-    c, h, w = imgs[0].shape
-    padded = torch.zeros(max_num, c, h, w)
-    mask = torch.zeros(max_num, dtype=torch.long)
-
-    actual_num = min(len(imgs), max_num)
-    for i in range(actual_num):
-        padded[i] = imgs[i]
-        mask[i] = 1
-
-    return padded, mask
-
-
-def build_sample_tensors(sample_dir):
-    meta_path = os.path.join(sample_dir, "meta.json")
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-
-    local_imgs = []
-    global_imgs = []
-
-    for item in meta["images"]:
-        img_path = os.path.join(sample_dir, item["file"])
-        fov = item["fov"]
-        img = load_image(img_path, IMAGE_SIZE)
-
-        if fov <= LOCAL_FOV_THRESHOLD:
-            local_imgs.append(img)
-        else:
-            global_imgs.append(img)
-
-    if len(local_imgs) == 0 and len(global_imgs) > 0:
-        local_imgs.append(global_imgs[0].clone())
-    if len(global_imgs) == 0 and len(local_imgs) > 0:
-        global_imgs.append(local_imgs[0].clone())
-
-    local_imgs, local_mask = pad_images(local_imgs, MAX_LOCAL_VIEWS)
-    global_imgs, global_mask = pad_images(global_imgs, MAX_GLOBAL_VIEWS)
-
-    # add batch dimension
-    local_imgs = local_imgs.unsqueeze(0)
-    global_imgs = global_imgs.unsqueeze(0)
-    local_mask = local_mask.unsqueeze(0)
-    global_mask = global_mask.unsqueeze(0)
-
-    return local_imgs, global_imgs, local_mask, global_mask
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        xticklabels=class_names,
+        yticklabels=class_names
+    )
+    plt.xlabel("Predicted")
+    plt.ylabel("Ground Truth")
+    plt.title("Test Confusion Matrix")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()
 
 
 @torch.no_grad()
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--sample_dir", type=str, required=True)
-    parser.add_argument("--ckpt", type=str, required=True)
-    args = parser.parse_args()
-
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+    os.makedirs(INFER_DIR, exist_ok=True)
+
+    test_dirs = get_sample_dirs(TEST_DIR)
+    test_dataset = DefectSampleDataset(
+        sample_dirs=test_dirs,
+        label_map=LABEL_MAP,
+        image_size=IMAGE_SIZE,
+        max_local=MAX_LOCAL_VIEWS,
+        max_global=MAX_GLOBAL_VIEWS,
+        local_fov_threshold=LOCAL_FOV_THRESHOLD,
+        is_train=False
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True
+    )
 
     model = DefectClassifier(
+        backbone_type=BACKBONE_TYPE,
         backbone_name=BACKBONE_NAME,
+        pretrained=False,
+        pretrained_path=LOCAL_PRETRAINED_PATH if BACKBONE_TYPE == "resnet50_local" else None,
         feat_dim=FEAT_DIM,
         num_classes=NUM_CLASSES,
-        num_attrs=NUM_ATTRS,
-        pretrained=False
+        num_attrs=NUM_ATTRS
     ).to(device)
 
-    checkpoint = torch.load(args.ckpt, map_location=device)
+    ckpt_path = os.path.join(SAVE_DIR, BEST_MODEL_NAME)
+    checkpoint = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    local_imgs, global_imgs, local_mask, global_mask = build_sample_tensors(args.sample_dir)
-    local_imgs = local_imgs.to(device)
-    global_imgs = global_imgs.to(device)
-    local_mask = local_mask.to(device)
-    global_mask = global_mask.to(device)
+    all_rows = []
+    y_true = []
+    y_pred = []
 
-    outputs = model(
-        local_imgs=local_imgs,
-        global_imgs=global_imgs,
-        local_mask=local_mask,
-        global_mask=global_mask
-    )
+    for batch in tqdm(test_loader, desc="Infer"):
+        local_imgs = batch["local_imgs"].to(device)
+        global_imgs = batch["global_imgs"].to(device)
+        local_mask = batch["local_mask"].to(device)
+        global_mask = batch["global_mask"].to(device)
+        labels = batch["label"].to(device)
+        sample_dirs_batch = batch["sample_dir"]
 
-    probs = torch.softmax(outputs["logits"], dim=1)[0]
-    pred_idx = torch.argmax(probs).item()
-    pred_name = IDX2LABEL[pred_idx]
+        outputs = model(
+            local_imgs=local_imgs,
+            global_imgs=global_imgs,
+            local_mask=local_mask,
+            global_mask=global_mask
+        )
 
-    attr_probs = torch.sigmoid(outputs["attr_logits"])[0].cpu().tolist()
-    local_attn = outputs["local_attn"][0].cpu().tolist()
-    global_attn = outputs["global_attn"][0].cpu().tolist()
+        probs = torch.softmax(outputs["logits"], dim=1)
+        confs, preds = torch.max(probs, dim=1)
 
-    print("===== Prediction =====")
-    print(f"Predicted class: {pred_name}")
-    print("Class probabilities:")
-    for i in range(len(probs)):
-        print(f"  {IDX2LABEL[i]}: {probs[i].item():.4f}")
+        for i in range(len(sample_dirs_batch)):
+            sample_name = os.path.basename(sample_dirs_batch[i])
+            gt_idx = labels[i].item()
+            pred_idx = preds[i].item()
+            conf = confs[i].item()
 
-    print("\nAttribute probabilities:")
-    print(f"  has_np_pattern:    {attr_probs[0]:.4f}")
-    print(f"  is_repetitive:     {attr_probs[1]:.4f}")
-    print(f"  has_breakpoint:    {attr_probs[2]:.4f}")
-    print(f"  is_single_struct:  {attr_probs[3]:.4f}")
+            row = {
+                "sample_name": sample_name,
+                "gt_cls": IDX2LABEL[gt_idx],
+                "pred_cls": IDX2LABEL[pred_idx],
+                "conf": conf,
+                "correct": int(gt_idx == pred_idx),
+            }
 
-    print("\nLocal attention weights:")
-    print(local_attn)
+            for cls_idx in range(NUM_CLASSES):
+                row[f"prob_{IDX2LABEL[cls_idx]}"] = probs[i, cls_idx].item()
 
-    print("\nGlobal attention weights:")
-    print(global_attn)
+            all_rows.append(row)
+            y_true.append(gt_idx)
+            y_pred.append(pred_idx)
+
+    # 寫 CSV
+    fieldnames = [
+        "sample_name", "gt_cls", "pred_cls", "conf", "correct"
+    ] + [f"prob_{IDX2LABEL[i]}" for i in range(NUM_CLASSES)]
+
+    with open(TEST_PRED_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(all_rows)
+
+    # confusion matrix
+    class_names = [IDX2LABEL[i] for i in range(NUM_CLASSES)]
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(NUM_CLASSES)))
+    save_confusion_matrix(cm, class_names, TEST_CM_PNG)
+
+    acc = sum(int(a == b) for a, b in zip(y_true, y_pred)) / len(y_true)
+
+    print("===== Inference Finished =====")
+    print(f"Checkpoint: {ckpt_path}")
+    print(f"Test samples: {len(y_true)}")
+    print(f"Accuracy: {acc:.4f}")
+    print(f"Prediction CSV saved to: {TEST_PRED_CSV}")
+    print(f"Confusion matrix figure saved to: {TEST_CM_PNG}")
+    print("Confusion Matrix:")
+    print(cm)
 
 
 if __name__ == "__main__":
