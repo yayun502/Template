@@ -5,6 +5,7 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR, ReduceLROnPlateau
 
 from configs.config import (
     TRAIN_DIR, VAL_DIR, LABEL_MAP, IDX2LABEL,
@@ -14,7 +15,13 @@ from configs.config import (
     FEAT_DIM, NUM_CLASSES, NUM_ATTRS,
     EPOCHS, LR, WEIGHT_DECAY, ATTR_LOSS_WEIGHT, DEVICE,
     SAVE_DIR, BEST_MODEL_NAME, LAST_MODEL_NAME,
-    LOG_DIR, TRAIN_LOG_CSV
+    LOG_DIR, TRAIN_LOG_CSV,
+    USE_CLASS_WEIGHTS, CLASS_WEIGHTS,
+    CLS_LOSS_TYPE, FOCAL_GAMMA,
+    SCHEDULER_TYPE,
+    STEP_SIZE, STEP_GAMMA,
+    PLATEAU_MODE, PLATEAU_FACTOR, PLATEAU_PATIENCE,
+    COSINE_T_MAX, COSINE_ETA_MIN
 )
 from data.dataset import DefectSampleDataset, get_sample_dirs
 from models.defect_model import DefectClassifier
@@ -30,6 +37,7 @@ def init_train_log(csv_path):
             writer = csv.writer(f)
             writer.writerow([
                 "epoch",
+                "lr",
                 "train_loss",
                 "train_cls_loss",
                 "train_attr_loss",
@@ -46,7 +54,48 @@ def append_train_log(csv_path, row):
         writer.writerow(row)
 
 
-def train_one_epoch(model, loader, optimizer, device, attr_loss_weight):
+def build_scheduler(optimizer):
+    if SCHEDULER_TYPE == "none":
+        scheduler = None
+
+    elif SCHEDULER_TYPE == "step":
+        scheduler = StepLR(
+            optimizer,
+            step_size=STEP_SIZE,
+            gamma=STEP_GAMMA
+        )
+
+    elif SCHEDULER_TYPE == "cosine":
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=COSINE_T_MAX,
+            eta_min=COSINE_ETA_MIN
+        )
+
+    elif SCHEDULER_TYPE == "plateau":
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode=PLATEAU_MODE,
+            factor=PLATEAU_FACTOR,
+            patience=PLATEAU_PATIENCE
+        )
+
+    else:
+        raise ValueError(f"Unsupported scheduler type: {SCHEDULER_TYPE}")
+
+    return scheduler
+
+
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+    attr_loss_weight,
+    class_weights=None,
+    cls_loss_type="ce",
+    focal_gamma=2.0
+):
     model.train()
 
     total_loss = 0.0
@@ -69,7 +118,13 @@ def train_one_epoch(model, loader, optimizer, device, attr_loss_weight):
         )
 
         loss, cls_loss, attr_loss = compute_total_loss(
-            outputs, labels, attr_labels, attr_loss_weight
+            outputs,
+            labels,
+            attr_labels,
+            attr_loss_weight=attr_loss_weight,
+            class_weights=class_weights,
+            cls_loss_type=cls_loss_type,
+            focal_gamma=focal_gamma
         )
 
         optimizer.zero_grad()
@@ -89,7 +144,15 @@ def train_one_epoch(model, loader, optimizer, device, attr_loss_weight):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, attr_loss_weight):
+def evaluate(
+    model,
+    loader,
+    device,
+    attr_loss_weight,
+    class_weights=None,
+    cls_loss_type="ce",
+    focal_gamma=2.0
+):
     model.eval()
 
     total_loss = 0.0
@@ -115,7 +178,13 @@ def evaluate(model, loader, device, attr_loss_weight):
         )
 
         loss, cls_loss, attr_loss = compute_total_loss(
-            outputs, labels, attr_labels, attr_loss_weight
+            outputs,
+            labels,
+            attr_labels,
+            attr_loss_weight=attr_loss_weight,
+            class_weights=class_weights,
+            cls_loss_type=cls_loss_type,
+            focal_gamma=focal_gamma
         )
 
         preds = torch.argmax(outputs["logits"], dim=1)
@@ -205,20 +274,57 @@ def main():
         weight_decay=WEIGHT_DECAY
     )
 
+    scheduler = build_scheduler(optimizer)
+
+    print(f"Scheduler type: {SCHEDULER_TYPE}")
+    print(f"Classification loss type: {CLS_LOSS_TYPE}")
+    if CLS_LOSS_TYPE == "focal":
+        print(f"Focal gamma: {FOCAL_GAMMA}")
+
+    if USE_CLASS_WEIGHTS:
+        class_weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32).to(device)
+        print(f"Using class weights: {CLASS_WEIGHTS}")
+    else:
+        class_weights = None
+        print("Not using class weights.")
+
     best_acc = 0.0
 
     for epoch in range(1, EPOCHS + 1):
         print(f"\n===== Epoch {epoch}/{EPOCHS} =====")
 
         train_stats = train_one_epoch(
-            model, train_loader, optimizer, device, ATTR_LOSS_WEIGHT
+            model,
+            train_loader,
+            optimizer,
+            device,
+            ATTR_LOSS_WEIGHT,
+            class_weights=class_weights,
+            cls_loss_type=CLS_LOSS_TYPE,
+            focal_gamma=FOCAL_GAMMA
         )
+
         val_stats = evaluate(
-            model, val_loader, device, ATTR_LOSS_WEIGHT
+            model,
+            val_loader,
+            device,
+            ATTR_LOSS_WEIGHT,
+            class_weights=class_weights,
+            cls_loss_type=CLS_LOSS_TYPE,
+            focal_gamma=FOCAL_GAMMA
         )
 
         val_acc = val_stats["metrics"]["accuracy"]
 
+        if scheduler is not None:
+            if SCHEDULER_TYPE == "plateau":
+                scheduler.step(val_acc)
+            else:
+                scheduler.step()
+
+        current_lr = optimizer.param_groups[0]["lr"]
+
+        print(f"Current LR: {current_lr:.8f}")
         print(
             f"Train Loss: {train_stats['loss']:.4f} | "
             f"Cls: {train_stats['cls_loss']:.4f} | "
@@ -237,6 +343,7 @@ def main():
 
         append_train_log(TRAIN_LOG_CSV, [
             epoch,
+            current_lr,
             train_stats["loss"],
             train_stats["cls_loss"],
             train_stats["attr_loss"],
