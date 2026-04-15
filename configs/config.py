@@ -45,6 +45,34 @@ WEIGHT_DECAY = 1e-4
 ATTR_LOSS_WEIGHT = 0.5
 DEVICE = "cuda"
 
+# ========= Class Weight =========
+# 順序必須和 LABEL_MAP 一致:
+# 0: Single, 1: NP, 2: 定點, 3: Multi
+USE_CLASS_WEIGHTS = True
+CLASS_WEIGHTS = [1.0, 2.0, 2.0, 1.5]
+
+# ========= Classification Loss =========
+# 可選: "ce" 或 "focal"
+CLS_LOSS_TYPE = "focal"
+FOCAL_GAMMA = 2.0
+
+# ========= Scheduler =========
+# 可選: "none", "cosine", "step", "plateau"
+SCHEDULER_TYPE = "cosine"
+
+# for StepLR
+STEP_SIZE = 10
+STEP_GAMMA = 0.1
+
+# for ReduceLROnPlateau
+PLATEAU_MODE = "max"
+PLATEAU_FACTOR = 0.5
+PLATEAU_PATIENCE = 3
+
+# for CosineAnnealingLR
+COSINE_T_MAX = EPOCHS
+COSINE_ETA_MIN = 1e-6
+
 # ========= Save =========
 SAVE_DIR = "./checkpoints"
 BEST_MODEL_NAME = "best_model.pt"
@@ -58,3 +86,6 @@ TRAIN_LOG_CSV = os.path.join(LOG_DIR, "train_log.csv")
 INFER_DIR = "./inference_outputs"
 TEST_PRED_CSV = os.path.join(INFER_DIR, "test_predictions.csv")
 TEST_CM_PNG = os.path.join(INFER_DIR, "test_confusion_matrix.png")
+
+ATTN_CSV = os.path.join(INFER_DIR, "test_attention_weights.csv")
+ATTN_FIG_DIR = os.path.join(INFER_DIR, "attention_figures")
