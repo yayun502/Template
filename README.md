@@ -1,3 +1,8 @@
+# Main change for this branch
+- train 支援 離線載入 resnet50 權重
+- train 支援 輸出 logging csv
+- infer 改為 整個 test split inference  
+- infer 支援 輸出 result csv (+ confusion matrix 圖檔)
 # Overview
 ## 核心設計
 - 同一個 defect sample 有多張子圖
