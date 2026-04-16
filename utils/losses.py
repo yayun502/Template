@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from utils.hierarchical import hierarchical_nll_loss, build_gate_targets
 
 
 def multiclass_focal_loss(
@@ -40,12 +41,14 @@ def multiclass_focal_loss(
 def compute_total_loss(
     outputs,
     class_labels,
-    attr_labels,
-    attr_loss_weight=0.5,
     class_weights=None,
     cls_loss_type="ce",
-    focal_gamma=2.0
+    focal_gamma=2.0,
+    use_hierarchical=False,
+    hier_loss_weight=0.5,
+    gate_loss_weight=0.3
 ):
+    # ----- 原本 4-class main loss -----
     if cls_loss_type == "ce":
         cls_loss = F.cross_entropy(
             outputs["logits"],
@@ -65,11 +68,24 @@ def compute_total_loss(
     else:
         raise ValueError(f"Unsupported cls_loss_type: {cls_loss_type}")
 
-    attr_loss = F.binary_cross_entropy_with_logits(
-        outputs["attr_logits"],
-        attr_labels.float()
-    )
+    total_loss = cls_loss
 
-    total_loss = cls_loss + attr_loss_weight * attr_loss
+    hier_loss = torch.tensor(0.0, device=class_labels.device)
+    gate_loss = torch.tensor(0.0, device=class_labels.device)
 
-    return total_loss, cls_loss, attr_loss
+    if use_hierarchical:
+        hier_loss = hierarchical_nll_loss(
+            outputs["hier_logits"],
+            class_labels,
+            class_weights=class_weights
+        )
+
+        gate_targets = build_gate_targets(class_labels)
+        gate_loss = F.binary_cross_entropy_with_logits(
+            outputs["hier_logits"],
+            gate_targets
+        )
+
+        total_loss = total_loss + hier_loss_weight * hier_loss + gate_loss_weight * gate_loss
+
+    return total_loss, cls_loss, hier_loss, gate_loss
