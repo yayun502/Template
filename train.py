@@ -12,12 +12,13 @@ from configs.config import (
     IMAGE_SIZE, MAX_LOCAL_VIEWS, MAX_GLOBAL_VIEWS, LOCAL_FOV_THRESHOLD,
     NUM_WORKERS, BATCH_SIZE,
     BACKBONE_TYPE, BACKBONE_NAME, LOCAL_PRETRAINED_PATH,
-    FEAT_DIM, NUM_CLASSES, NUM_ATTRS,
-    EPOCHS, LR, WEIGHT_DECAY, ATTR_LOSS_WEIGHT, DEVICE,
+    FEAT_DIM, NUM_CLASSES,
+    EPOCHS, LR, WEIGHT_DECAY, DEVICE,
     SAVE_DIR, BEST_MODEL_NAME, LAST_MODEL_NAME,
     LOG_DIR, TRAIN_LOG_CSV,
     USE_CLASS_WEIGHTS, CLASS_WEIGHTS,
     CLS_LOSS_TYPE, FOCAL_GAMMA,
+    USE_HIERARCHICAL_HEAD, HIER_LOSS_WEIGHT, GATE_LOSS_WEIGHT,
     SCHEDULER_TYPE,
     STEP_SIZE, STEP_GAMMA,
     PLATEAU_MODE, PLATEAU_FACTOR, PLATEAU_PATIENCE,
@@ -40,10 +41,12 @@ def init_train_log(csv_path):
                 "lr",
                 "train_loss",
                 "train_cls_loss",
-                "train_attr_loss",
+                "train_hier_loss",
+                "train_gate_loss",
                 "val_loss",
                 "val_cls_loss",
-                "val_attr_loss",
+                "val_hier_loss",
+                "val_gate_loss",
                 "val_acc"
             ])
 
@@ -91,16 +94,19 @@ def train_one_epoch(
     loader,
     optimizer,
     device,
-    attr_loss_weight,
     class_weights=None,
     cls_loss_type="ce",
-    focal_gamma=2.0
+    focal_gamma=2.0,
+    use_hierarchical=False,
+    hier_loss_weight=0.5,
+    gate_loss_weight=0.3
 ):
     model.train()
 
     total_loss = 0.0
     total_cls_loss = 0.0
-    total_attr_loss = 0.0
+    total_hier_loss = 0.0
+    total_gate_loss = 0.0
 
     for batch in tqdm(loader, desc="Train", leave=False):
         local_imgs = batch["local_imgs"].to(device)
@@ -108,7 +114,6 @@ def train_one_epoch(
         local_mask = batch["local_mask"].to(device)
         global_mask = batch["global_mask"].to(device)
         labels = batch["label"].to(device)
-        attr_labels = batch["attr_labels"].to(device)
 
         outputs = model(
             local_imgs=local_imgs,
@@ -117,14 +122,15 @@ def train_one_epoch(
             global_mask=global_mask
         )
 
-        loss, cls_loss, attr_loss = compute_total_loss(
-            outputs,
-            labels,
-            attr_labels,
-            attr_loss_weight=attr_loss_weight,
+        loss, cls_loss, hier_loss, gate_loss = compute_total_loss(
+            outputs=outputs,
+            class_labels=labels,
             class_weights=class_weights,
             cls_loss_type=cls_loss_type,
-            focal_gamma=focal_gamma
+            focal_gamma=focal_gamma,
+            use_hierarchical=use_hierarchical,
+            hier_loss_weight=hier_loss_weight,
+            gate_loss_weight=gate_loss_weight
         )
 
         optimizer.zero_grad()
@@ -133,13 +139,15 @@ def train_one_epoch(
 
         total_loss += loss.item()
         total_cls_loss += cls_loss.item()
-        total_attr_loss += attr_loss.item()
+        total_hier_loss += hier_loss.item()
+        total_gate_loss += gate_loss.item()
 
     n = len(loader)
     return {
         "loss": total_loss / n,
         "cls_loss": total_cls_loss / n,
-        "attr_loss": total_attr_loss / n
+        "hier_loss": total_hier_loss / n,
+        "gate_loss": total_gate_loss / n
     }
 
 
@@ -148,16 +156,19 @@ def evaluate(
     model,
     loader,
     device,
-    attr_loss_weight,
     class_weights=None,
     cls_loss_type="ce",
-    focal_gamma=2.0
+    focal_gamma=2.0,
+    use_hierarchical=False,
+    hier_loss_weight=0.5,
+    gate_loss_weight=0.3
 ):
     model.eval()
 
     total_loss = 0.0
     total_cls_loss = 0.0
-    total_attr_loss = 0.0
+    total_hier_loss = 0.0
+    total_gate_loss = 0.0
 
     y_true = []
     y_pred = []
@@ -168,7 +179,6 @@ def evaluate(
         local_mask = batch["local_mask"].to(device)
         global_mask = batch["global_mask"].to(device)
         labels = batch["label"].to(device)
-        attr_labels = batch["attr_labels"].to(device)
 
         outputs = model(
             local_imgs=local_imgs,
@@ -177,21 +187,23 @@ def evaluate(
             global_mask=global_mask
         )
 
-        loss, cls_loss, attr_loss = compute_total_loss(
-            outputs,
-            labels,
-            attr_labels,
-            attr_loss_weight=attr_loss_weight,
+        loss, cls_loss, hier_loss, gate_loss = compute_total_loss(
+            outputs=outputs,
+            class_labels=labels,
             class_weights=class_weights,
             cls_loss_type=cls_loss_type,
-            focal_gamma=focal_gamma
+            focal_gamma=focal_gamma,
+            use_hierarchical=use_hierarchical,
+            hier_loss_weight=hier_loss_weight,
+            gate_loss_weight=gate_loss_weight
         )
 
         preds = torch.argmax(outputs["logits"], dim=1)
 
         total_loss += loss.item()
         total_cls_loss += cls_loss.item()
-        total_attr_loss += attr_loss.item()
+        total_hier_loss += hier_loss.item()
+        total_gate_loss += gate_loss.item()
 
         y_true.extend(labels.cpu().tolist())
         y_pred.extend(preds.cpu().tolist())
@@ -205,7 +217,8 @@ def evaluate(
     return {
         "loss": total_loss / n,
         "cls_loss": total_cls_loss / n,
-        "attr_loss": total_attr_loss / n,
+        "hier_loss": total_hier_loss / n,
+        "gate_loss": total_gate_loss / n,
         "metrics": metrics
     }
 
@@ -264,8 +277,7 @@ def main():
         pretrained=(BACKBONE_TYPE == "timm"),
         pretrained_path=LOCAL_PRETRAINED_PATH if BACKBONE_TYPE == "resnet50_local" else None,
         feat_dim=FEAT_DIM,
-        num_classes=NUM_CLASSES,
-        num_attrs=NUM_ATTRS
+        num_classes=NUM_CLASSES
     ).to(device)
 
     optimizer = AdamW(
@@ -281,6 +293,11 @@ def main():
     if CLS_LOSS_TYPE == "focal":
         print(f"Focal gamma: {FOCAL_GAMMA}")
 
+    print(f"Use hierarchical head: {USE_HIERARCHICAL_HEAD}")
+    if USE_HIERARCHICAL_HEAD:
+        print(f"Hier loss weight: {HIER_LOSS_WEIGHT}")
+        print(f"Gate loss weight: {GATE_LOSS_WEIGHT}")
+
     if USE_CLASS_WEIGHTS:
         class_weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32).to(device)
         print(f"Using class weights: {CLASS_WEIGHTS}")
@@ -294,24 +311,28 @@ def main():
         print(f"\n===== Epoch {epoch}/{EPOCHS} =====")
 
         train_stats = train_one_epoch(
-            model,
-            train_loader,
-            optimizer,
-            device,
-            ATTR_LOSS_WEIGHT,
+            model=model,
+            loader=train_loader,
+            optimizer=optimizer,
+            device=device,
             class_weights=class_weights,
             cls_loss_type=CLS_LOSS_TYPE,
-            focal_gamma=FOCAL_GAMMA
+            focal_gamma=FOCAL_GAMMA,
+            use_hierarchical=USE_HIERARCHICAL_HEAD,
+            hier_loss_weight=HIER_LOSS_WEIGHT,
+            gate_loss_weight=GATE_LOSS_WEIGHT
         )
 
         val_stats = evaluate(
-            model,
-            val_loader,
-            device,
-            ATTR_LOSS_WEIGHT,
+            model=model,
+            loader=val_loader,
+            device=device,
             class_weights=class_weights,
             cls_loss_type=CLS_LOSS_TYPE,
-            focal_gamma=FOCAL_GAMMA
+            focal_gamma=FOCAL_GAMMA,
+            use_hierarchical=USE_HIERARCHICAL_HEAD,
+            hier_loss_weight=HIER_LOSS_WEIGHT,
+            gate_loss_weight=GATE_LOSS_WEIGHT
         )
 
         val_acc = val_stats["metrics"]["accuracy"]
@@ -328,12 +349,14 @@ def main():
         print(
             f"Train Loss: {train_stats['loss']:.4f} | "
             f"Cls: {train_stats['cls_loss']:.4f} | "
-            f"Attr: {train_stats['attr_loss']:.4f}"
+            f"Hier: {train_stats['hier_loss']:.4f} | "
+            f"Gate: {train_stats['gate_loss']:.4f}"
         )
         print(
             f"Val Loss:   {val_stats['loss']:.4f} | "
             f"Cls: {val_stats['cls_loss']:.4f} | "
-            f"Attr: {val_stats['attr_loss']:.4f}"
+            f"Hier: {val_stats['hier_loss']:.4f} | "
+            f"Gate: {val_stats['gate_loss']:.4f}"
         )
         print(f"Val Acc: {val_acc:.4f}")
         print("Classification Report:")
@@ -346,10 +369,12 @@ def main():
             current_lr,
             train_stats["loss"],
             train_stats["cls_loss"],
-            train_stats["attr_loss"],
+            train_stats["hier_loss"],
+            train_stats["gate_loss"],
             val_stats["loss"],
             val_stats["cls_loss"],
-            val_stats["attr_loss"],
+            val_stats["hier_loss"],
+            val_stats["gate_loss"],
             val_acc
         ])
 
