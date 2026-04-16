@@ -36,13 +36,11 @@ LOCAL_PRETRAINED_PATH = "./pretrained/resnet50.pth"
 
 FEAT_DIM = 256
 NUM_CLASSES = 4
-NUM_ATTRS = 4   # has_np, repetitive, breakpoint, single_structure
 
 # ========= Training =========
 EPOCHS = 30
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
-ATTR_LOSS_WEIGHT = 0.5
 DEVICE = "cuda"
 
 # ========= Class Weight =========
@@ -51,10 +49,19 @@ DEVICE = "cuda"
 USE_CLASS_WEIGHTS = True
 CLASS_WEIGHTS = [1.0, 2.0, 2.0, 1.5]
 
-# ========= Classification Loss =========
+# ========= Main Classification Loss =========
 # 可選: "ce" 或 "focal"
 CLS_LOSS_TYPE = "focal"
 FOCAL_GAMMA = 2.0
+
+# ========= Hierarchical Head =========
+USE_HIERARCHICAL_HEAD = True
+HIER_LOSS_WEIGHT = 0.5
+GATE_LOSS_WEIGHT = 0.3
+
+# inference 時主預測使用哪個 head:
+# 可選: "main" 或 "hier"
+INFER_PRED_HEAD = "main"
 
 # ========= Scheduler =========
 # 可選: "none", "cosine", "step", "plateau"
