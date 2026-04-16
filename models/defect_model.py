@@ -24,11 +24,9 @@ class ImageEncoder(nn.Module):
             if pretrained_path is not None and os.path.exists(pretrained_path):
                 state_dict = torch.load(pretrained_path, map_location="cpu")
 
-                # 有些 .pth 可能包成 {"state_dict": ...}
                 if isinstance(state_dict, dict) and "state_dict" in state_dict:
                     state_dict = state_dict["state_dict"]
 
-                # 若 key 前面有 "module."，移除
                 new_state_dict = {}
                 for k, v in state_dict.items():
                     if k.startswith("module."):
@@ -81,7 +79,7 @@ class AttentionPooling(nn.Module):
         feats: [B, N, D]
         mask:  [B, N], 1 valid / 0 padding
         """
-        scores = self.attn(feats).squeeze(-1)  # [B, N]
+        scores = self.attn(feats).squeeze(-1)
 
         if mask is not None:
             scores = scores.masked_fill(mask == 0, -1e9)
@@ -99,8 +97,7 @@ class DefectClassifier(nn.Module):
         pretrained=True,
         pretrained_path=None,
         feat_dim=256,
-        num_classes=4,
-        num_attrs=4
+        num_classes=4
     ):
         super().__init__()
 
@@ -123,8 +120,8 @@ class DefectClassifier(nn.Module):
             nn.Dropout(0.2)
         )
 
-        self.main_head = nn.Linear(fusion_dim, num_classes)
-        self.attr_head = nn.Linear(fusion_dim, num_attrs)
+        self.main_head = nn.Linear(fusion_dim, num_classes)   # 原本 4-class head
+        self.hier_head = nn.Linear(fusion_dim, 3)             # [np, single, breakpoint]
 
     def encode_views(self, x):
         """
@@ -147,12 +144,12 @@ class DefectClassifier(nn.Module):
         fused = torch.cat([local_pooled, global_pooled], dim=-1)
         fused = self.fusion(fused)
 
-        logits = self.main_head(fused)
-        attr_logits = self.attr_head(fused)
+        logits = self.main_head(fused)       # [B, 4]
+        hier_logits = self.hier_head(fused)  # [B, 3]
 
         return {
             "logits": logits,
-            "attr_logits": attr_logits,
+            "hier_logits": hier_logits,
             "local_attn": local_attn,
             "global_attn": global_attn,
             "fused_feat": fused
