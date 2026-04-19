@@ -25,14 +25,21 @@ NUM_WORKERS = 4
 BATCH_SIZE = 8
 
 # ========= Model =========
-# 可選: "resnet50_local" 或 "timm"
-BACKBONE_TYPE = "resnet50_local"
+# 可選:
+#   "resnet50_local"
+#   "dinov2_local"
+#   "timm"
+BACKBONE_TYPE = "dinov2_local"
 
-# 如果是 timm 模式才會用到
-BACKBONE_NAME = "convnext_tiny"
+# 如果是 dinov2_local:
+# 可選: "dinov2_vits14" / "dinov2_vitb14" / "dinov2_vitl14"
+BACKBONE_NAME = "dinov2_vitb14"
 
-# 如果是本地 resnet50 權重模式，請填你的 .pth 路徑
-LOCAL_PRETRAINED_PATH = "./pretrained/resnet50.pth"
+# 本地 official DINOv2 repo 路徑（完整下載的 repo 根目錄）
+DINO_REPO_DIR = "./third_party/dinov2"
+
+# 本地 checkpoint 路徑
+LOCAL_PRETRAINED_PATH = "./pretrained/dinov2_vitb14_pretrain.pth"
 
 FEAT_DIM = 256
 NUM_CLASSES = 4
@@ -44,8 +51,6 @@ WEIGHT_DECAY = 1e-4
 DEVICE = "cuda"
 
 # ========= Class Weight =========
-# 順序必須和 LABEL_MAP 一致:
-# 0: Single, 1: NP, 2: 定點, 3: Multi
 USE_CLASS_WEIGHTS = True
 CLASS_WEIGHTS = [1.0, 2.0, 2.0, 1.5]
 
