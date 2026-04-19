@@ -1,8 +1,35 @@
 import os
+import sys
 import torch
 import torch.nn as nn
 import timm
 from torchvision import models
+
+
+def extract_state_dict(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+
+    for k in ["state_dict", "model", "teacher", "student", "backbone"]:
+        if k in checkpoint:
+            return checkpoint[k]
+
+    return checkpoint
+
+
+def clean_state_dict_keys(state_dict):
+    cleaned = {}
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            k = k[len("module."):]
+        if k.startswith("backbone."):
+            k = k[len("backbone."):]
+        if k.startswith("encoder."):
+            k = k[len("encoder."):]
+        if k.startswith("model."):
+            k = k[len("model."):]
+        cleaned[k] = v
+    return cleaned
 
 
 class ImageEncoder(nn.Module):
@@ -12,7 +39,8 @@ class ImageEncoder(nn.Module):
         model_name="convnext_tiny",
         pretrained=True,
         pretrained_path=None,
-        out_dim=256
+        out_dim=256,
+        dino_repo_dir=None
     ):
         super().__init__()
 
@@ -22,18 +50,11 @@ class ImageEncoder(nn.Module):
             backbone = models.resnet50(weights=None)
 
             if pretrained_path is not None and os.path.exists(pretrained_path):
-                state_dict = torch.load(pretrained_path, map_location="cpu")
+                checkpoint = torch.load(pretrained_path, map_location="cpu")
+                state_dict = extract_state_dict(checkpoint)
+                state_dict = clean_state_dict_keys(state_dict)
 
-                if isinstance(state_dict, dict) and "state_dict" in state_dict:
-                    state_dict = state_dict["state_dict"]
-
-                new_state_dict = {}
-                for k, v in state_dict.items():
-                    if k.startswith("module."):
-                        k = k[len("module."):]
-                    new_state_dict[k] = v
-
-                missing, unexpected = backbone.load_state_dict(new_state_dict, strict=False)
+                missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
                 print(f"[ImageEncoder] Loaded local pretrained weights from: {pretrained_path}")
                 print(f"[ImageEncoder] Missing keys: {missing}")
                 print(f"[ImageEncoder] Unexpected keys: {unexpected}")
@@ -42,6 +63,53 @@ class ImageEncoder(nn.Module):
 
             in_dim = backbone.fc.in_features
             backbone.fc = nn.Identity()
+
+            self.backbone = backbone
+            self.proj = nn.Linear(in_dim, out_dim)
+
+        elif backbone_type == "dinov2_local":
+            if dino_repo_dir is None:
+                raise ValueError("dino_repo_dir must be provided when backbone_type='dinov2_local'")
+            if not os.path.isdir(dino_repo_dir):
+                raise ValueError(f"DINO repo dir not found: {dino_repo_dir}")
+
+            if dino_repo_dir not in sys.path:
+                sys.path.insert(0, dino_repo_dir)
+
+            # model_name: dinov2_vits14 / dinov2_vitb14 / dinov2_vitl14
+            try:
+                backbone = torch.hub.load(
+                    dino_repo_dir,
+                    model_name,
+                    source="local",
+                    pretrained=False
+                )
+            except TypeError:
+                # 如果本地 hub entrypoint 不接受 pretrained=False
+                backbone = torch.hub.load(
+                    dino_repo_dir,
+                    model_name,
+                    source="local"
+                )
+
+            if pretrained_path is not None and os.path.exists(pretrained_path):
+                checkpoint = torch.load(pretrained_path, map_location="cpu")
+                state_dict = extract_state_dict(checkpoint)
+                state_dict = clean_state_dict_keys(state_dict)
+
+                missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
+                print(f"[ImageEncoder] Loaded DINOv2 local weights from: {pretrained_path}")
+                print(f"[ImageEncoder] Missing keys: {missing}")
+                print(f"[ImageEncoder] Unexpected keys: {unexpected}")
+            else:
+                print("[ImageEncoder] No DINOv2 local pretrained weight loaded. Using hub/default init.")
+
+            if hasattr(backbone, "embed_dim"):
+                in_dim = backbone.embed_dim
+            elif hasattr(backbone, "num_features"):
+                in_dim = backbone.num_features
+            else:
+                raise ValueError("Cannot infer output feature dim from DINOv2 backbone.")
 
             self.backbone = backbone
             self.proj = nn.Linear(in_dim, out_dim)
@@ -61,8 +129,17 @@ class ImageEncoder(nn.Module):
 
     def forward(self, x):
         feat = self.backbone(x)
+        self._check_feat_shape(feat)
         feat = self.proj(feat)
         return feat
+
+    def _check_feat_shape(self, feat):
+        if feat.ndim != 2:
+            raise RuntimeError(
+                f"Expected backbone output shape [B, D], but got {tuple(feat.shape)}. "
+                "Please check whether your local DINOv2 hub model returns pooled features "
+                "or a token sequence in this repo version."
+            )
 
 
 class AttentionPooling(nn.Module):
@@ -75,10 +152,6 @@ class AttentionPooling(nn.Module):
         )
 
     def forward(self, feats, mask=None):
-        """
-        feats: [B, N, D]
-        mask:  [B, N], 1 valid / 0 padding
-        """
         scores = self.attn(feats).squeeze(-1)
 
         if mask is not None:
@@ -97,7 +170,8 @@ class DefectClassifier(nn.Module):
         pretrained=True,
         pretrained_path=None,
         feat_dim=256,
-        num_classes=4
+        num_classes=4,
+        dino_repo_dir=None
     ):
         super().__init__()
 
@@ -106,7 +180,8 @@ class DefectClassifier(nn.Module):
             model_name=backbone_name,
             pretrained=pretrained,
             pretrained_path=pretrained_path,
-            out_dim=feat_dim
+            out_dim=feat_dim,
+            dino_repo_dir=dino_repo_dir
         )
 
         self.local_pool = AttentionPooling(feat_dim=feat_dim)
@@ -120,14 +195,10 @@ class DefectClassifier(nn.Module):
             nn.Dropout(0.2)
         )
 
-        self.main_head = nn.Linear(fusion_dim, num_classes)   # 原本 4-class head
-        self.hier_head = nn.Linear(fusion_dim, 3)             # [np, single, breakpoint]
+        self.main_head = nn.Linear(fusion_dim, num_classes)
+        self.hier_head = nn.Linear(fusion_dim, 3)
 
     def encode_views(self, x):
-        """
-        x: [B, N, C, H, W]
-        return: [B, N, D]
-        """
         B, N, C, H, W = x.shape
         x = x.view(B * N, C, H, W)
         feats = self.encoder(x)
@@ -144,8 +215,8 @@ class DefectClassifier(nn.Module):
         fused = torch.cat([local_pooled, global_pooled], dim=-1)
         fused = self.fusion(fused)
 
-        logits = self.main_head(fused)       # [B, 4]
-        hier_logits = self.hier_head(fused)  # [B, 3]
+        logits = self.main_head(fused)
+        hier_logits = self.hier_head(fused)
 
         return {
             "logits": logits,
