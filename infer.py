@@ -13,7 +13,7 @@ from configs.config import (
     TEST_DIR, LABEL_MAP, IDX2LABEL,
     IMAGE_SIZE, MAX_LOCAL_VIEWS, MAX_GLOBAL_VIEWS, LOCAL_FOV_THRESHOLD,
     NUM_WORKERS, BATCH_SIZE,
-    BACKBONE_TYPE, BACKBONE_NAME, LOCAL_PRETRAINED_PATH,
+    BACKBONE_TYPE, BACKBONE_NAME, LOCAL_PRETRAINED_PATH, DINO_REPO_DIR,
     FEAT_DIM, NUM_CLASSES, DEVICE,
     SAVE_DIR, BEST_MODEL_NAME,
     INFER_DIR, TEST_PRED_CSV, TEST_CM_PNG,
@@ -147,9 +147,10 @@ def main():
         backbone_type=BACKBONE_TYPE,
         backbone_name=BACKBONE_NAME,
         pretrained=False,
-        pretrained_path=LOCAL_PRETRAINED_PATH if BACKBONE_TYPE == "resnet50_local" else None,
+        pretrained_path=LOCAL_PRETRAINED_PATH,
         feat_dim=FEAT_DIM,
-        num_classes=NUM_CLASSES
+        num_classes=NUM_CLASSES,
+        dino_repo_dir=DINO_REPO_DIR if BACKBONE_TYPE == "dinov2_local" else None
     ).to(device)
 
     ckpt_path = os.path.join(SAVE_DIR, BEST_MODEL_NAME)
@@ -178,10 +179,10 @@ def main():
             global_mask=global_mask
         )
 
-        main_probs = torch.softmax(outputs["logits"], dim=1)                   # [B,4]
-        hier_probs = hierarchical_probs_from_logits(outputs["hier_logits"])    # [B,4]
+        main_probs = torch.softmax(outputs["logits"], dim=1)
+        hier_probs = hierarchical_probs_from_logits(outputs["hier_logits"])
 
-        gate_probs = torch.sigmoid(outputs["hier_logits"])                     # [B,3]
+        gate_probs = torch.sigmoid(outputs["hier_logits"])
         p_np = gate_probs[:, 0]
         p_single = gate_probs[:, 1]
         p_bp = gate_probs[:, 2]
