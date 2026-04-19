@@ -11,7 +11,7 @@ from configs.config import (
     TRAIN_DIR, VAL_DIR, LABEL_MAP, IDX2LABEL,
     IMAGE_SIZE, MAX_LOCAL_VIEWS, MAX_GLOBAL_VIEWS, LOCAL_FOV_THRESHOLD,
     NUM_WORKERS, BATCH_SIZE,
-    BACKBONE_TYPE, BACKBONE_NAME, LOCAL_PRETRAINED_PATH,
+    BACKBONE_TYPE, BACKBONE_NAME, LOCAL_PRETRAINED_PATH, DINO_REPO_DIR,
     FEAT_DIM, NUM_CLASSES,
     EPOCHS, LR, WEIGHT_DECAY, DEVICE,
     SAVE_DIR, BEST_MODEL_NAME, LAST_MODEL_NAME,
@@ -60,21 +60,10 @@ def append_train_log(csv_path, row):
 def build_scheduler(optimizer):
     if SCHEDULER_TYPE == "none":
         scheduler = None
-
     elif SCHEDULER_TYPE == "step":
-        scheduler = StepLR(
-            optimizer,
-            step_size=STEP_SIZE,
-            gamma=STEP_GAMMA
-        )
-
+        scheduler = StepLR(optimizer, step_size=STEP_SIZE, gamma=STEP_GAMMA)
     elif SCHEDULER_TYPE == "cosine":
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=COSINE_T_MAX,
-            eta_min=COSINE_ETA_MIN
-        )
-
+        scheduler = CosineAnnealingLR(optimizer, T_max=COSINE_T_MAX, eta_min=COSINE_ETA_MIN)
     elif SCHEDULER_TYPE == "plateau":
         scheduler = ReduceLROnPlateau(
             optimizer,
@@ -82,10 +71,8 @@ def build_scheduler(optimizer):
             factor=PLATEAU_FACTOR,
             patience=PLATEAU_PATIENCE
         )
-
     else:
         raise ValueError(f"Unsupported scheduler type: {SCHEDULER_TYPE}")
-
     return scheduler
 
 
@@ -274,20 +261,18 @@ def main():
     model = DefectClassifier(
         backbone_type=BACKBONE_TYPE,
         backbone_name=BACKBONE_NAME,
-        pretrained=(BACKBONE_TYPE == "timm"),
-        pretrained_path=LOCAL_PRETRAINED_PATH if BACKBONE_TYPE == "resnet50_local" else None,
+        pretrained=False,
+        pretrained_path=LOCAL_PRETRAINED_PATH,
         feat_dim=FEAT_DIM,
-        num_classes=NUM_CLASSES
+        num_classes=NUM_CLASSES,
+        dino_repo_dir=DINO_REPO_DIR if BACKBONE_TYPE == "dinov2_local" else None
     ).to(device)
 
-    optimizer = AdamW(
-        model.parameters(),
-        lr=LR,
-        weight_decay=WEIGHT_DECAY
-    )
-
+    optimizer = AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler = build_scheduler(optimizer)
 
+    print(f"Backbone type: {BACKBONE_TYPE}")
+    print(f"Backbone name: {BACKBONE_NAME}")
     print(f"Scheduler type: {SCHEDULER_TYPE}")
     print(f"Classification loss type: {CLS_LOSS_TYPE}")
     if CLS_LOSS_TYPE == "focal":
