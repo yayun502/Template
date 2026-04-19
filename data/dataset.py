@@ -27,6 +27,11 @@ class DefectSampleDataset(Dataset):
         self.local_fov_threshold = local_fov_threshold
         self.is_train = is_train
 
+        normalize = transforms.Normalize(
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225)
+        )
+
         if is_train:
             self.transform = transforms.Compose([
                 transforms.Resize((image_size, image_size)),
@@ -34,11 +39,13 @@ class DefectSampleDataset(Dataset):
                 transforms.RandomVerticalFlip(p=0.3),
                 transforms.ColorJitter(brightness=0.15, contrast=0.15),
                 transforms.ToTensor(),
+                normalize,
             ])
         else:
             self.transform = transforms.Compose([
                 transforms.Resize((image_size, image_size)),
                 transforms.ToTensor(),
+                normalize,
             ])
 
     def __len__(self):
@@ -62,22 +69,6 @@ class DefectSampleDataset(Dataset):
             mask[i] = 1
 
         return padded, mask
-
-    def build_attr_labels(self, label_name):
-        """
-        [has_np_pattern, is_repetitive, has_breakpoint, is_single_structure]
-        先用簡化版規則；未來可換成人工標註
-        """
-        if label_name == "Single":
-            return [0, 1, 0, 1]
-        elif label_name == "NP":
-            return [1, 1, 0, 0]
-        elif label_name == "定點":
-            return [0, 0, 1, 0]
-        elif label_name == "Multi":
-            return [0, 0, 0, 0]
-        else:
-            raise ValueError(f"Unknown label: {label_name}")
 
     def __getitem__(self, idx):
         sample_dir = self.sample_dirs[idx]
@@ -104,7 +95,6 @@ class DefectSampleDataset(Dataset):
             else:
                 global_imgs.append(img)
 
-        # 如果某 branch 沒圖，先用另一 branch 的第一張補
         if len(local_imgs) == 0 and len(global_imgs) > 0:
             local_imgs.append(global_imgs[0].clone())
         if len(global_imgs) == 0 and len(local_imgs) > 0:
@@ -112,15 +102,11 @@ class DefectSampleDataset(Dataset):
 
         if len(local_imgs) == 0 or len(global_imgs) == 0:
             raise ValueError(f"Sample {sample_dir} has no valid images.")
-            
-        # sample 有時候：local 只有 1 張，有時候 8 張，global 也是浮動很多
-        # 目前：超過上限就只取前 max_num 張、不足就 padding
-        # 以後：拍攝順序選圖、乾脆保留更多張再改模型
+
         local_imgs, local_mask = self._pad_images(local_imgs, self.max_local)
         global_imgs, global_mask = self._pad_images(global_imgs, self.max_global)
 
         label = self.label_map[label_name]
-        attr_labels = self.build_attr_labels(label_name)
 
         return {
             "local_imgs": local_imgs,
@@ -128,7 +114,6 @@ class DefectSampleDataset(Dataset):
             "local_mask": local_mask,
             "global_mask": global_mask,
             "label": torch.tensor(label, dtype=torch.long),
-            "attr_labels": torch.tensor(attr_labels, dtype=torch.float32),
             "sample_dir": sample_dir
         }
 
