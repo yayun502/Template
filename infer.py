@@ -1,6 +1,5 @@
 import os
 import csv
-import json
 
 import torch
 import seaborn as sns
@@ -23,6 +22,7 @@ from configs.config import (
 from data.dataset import DefectSampleDataset, get_sample_dirs
 from models.defect_model import DefectClassifier
 from utils.hierarchical import hierarchical_probs_from_logits
+from utils.sample_ordering import load_and_prepare_sample_items
 
 
 def save_confusion_matrix(cm, class_names, save_path):
@@ -46,36 +46,15 @@ def save_confusion_matrix(cm, class_names, save_path):
 
 
 def load_sample_meta(sample_dir, local_fov_threshold, max_local, max_global):
-    meta_path = os.path.join(sample_dir, "meta.json")
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-
-    local_items = []
-    global_items = []
-
-    for item in meta["images"]:
-        file_name = item["file"]
-        fov = item["fov"]
-        if fov <= local_fov_threshold:
-            local_items.append({"image_name": file_name, "fov": fov})
-        else:
-            global_items.append({"image_name": file_name, "fov": fov})
-
-    if len(local_items) == 0 and len(global_items) > 0:
-        local_items.append({
-            "image_name": global_items[0]["image_name"],
-            "fov": global_items[0]["fov"]
-        })
-
-    if len(global_items) == 0 and len(local_items) > 0:
-        global_items.append({
-            "image_name": local_items[0]["image_name"],
-            "fov": local_items[0]["fov"]
-        })
-
-    local_items = local_items[:max_local]
-    global_items = global_items[:max_global]
-
+    """
+    與 dataset.py 完全共用相同的排序 / fallback / truncate 邏輯。
+    """
+    local_items, global_items = load_and_prepare_sample_items(
+        sample_dir=sample_dir,
+        local_fov_threshold=local_fov_threshold,
+        max_local=max_local,
+        max_global=max_global
+    )
     return local_items, global_items
 
 
