@@ -4,9 +4,11 @@ import csv
 import torch
 import seaborn as sns
 import matplotlib.pyplot as plt
+from PIL import Image
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix
+from matplotlib import gridspec
 
 from configs.config import (
     TEST_DIR, LABEL_MAP, IDX2LABEL,
@@ -58,43 +60,121 @@ def load_sample_meta(sample_dir, local_fov_threshold, max_local, max_global):
     return local_items, global_items
 
 
-def save_attention_bar_chart(sample_name, rows, save_dir):
+def load_display_images(sample_dir, items):
+    """
+    載入原始圖片供 figure 顯示，不經過 dataset transform。
+    """
+    images = []
+    for item in items:
+        img_path = os.path.join(sample_dir, item["image_name"])
+        img = Image.open(img_path).convert("RGB")
+        images.append(img)
+    return images
+
+
+def save_attention_visual_figure(
+    sample_dir,
+    sample_name,
+    gt_cls,
+    pred_cls,
+    conf,
+    rows,
+    save_dir
+):
+    """
+    rows: list of dicts
+      {
+        "sample_name": ...,
+        "gt_cls": ...,
+        "pred_cls": ...,
+        "branch": "local" / "global",
+        "image_name": ...,
+        "fov": ...,
+        "attention_weight": ...
+      }
+
+    產出包含：
+      - sample / gt / pred / conf 資訊
+      - local branch 對應圖片 + attention
+      - global branch 對應圖片 + attention
+      - 每個 branch 的 attention bar chart
+    """
     os.makedirs(save_dir, exist_ok=True)
 
     local_rows = [r for r in rows if r["branch"] == "local"]
     global_rows = [r for r in rows if r["branch"] == "global"]
 
-    n_local = len(local_rows)
-    n_global = len(global_rows)
-
-    if n_local == 0 and n_global == 0:
+    if len(local_rows) == 0 and len(global_rows) == 0:
         return
 
-    fig_h = 4 + max(n_local, n_global) * 0.4
-    plt.figure(figsize=(12, fig_h))
+    local_imgs = load_display_images(sample_dir, local_rows)
+    global_imgs = load_display_images(sample_dir, global_rows)
 
-    if n_local > 0:
-        plt.subplot(2, 1, 1)
-        labels = [f'{r["image_name"]}\n(FOV={r["fov"]})' for r in local_rows]
-        values = [r["attention_weight"] for r in local_rows]
-        plt.bar(range(len(values)), values)
-        plt.xticks(range(len(values)), labels, rotation=45, ha="right")
-        plt.ylabel("Attention")
-        plt.title(f"{sample_name} - Local Branch Attention")
+    max_imgs = max(len(local_rows), len(global_rows), 1)
 
-    if n_global > 0:
-        plt.subplot(2, 1, 2)
-        labels = [f'{r["image_name"]}\n(FOV={r["fov"]})' for r in global_rows]
-        values = [r["attention_weight"] for r in global_rows]
-        plt.bar(range(len(values)), values)
-        plt.xticks(range(len(values)), labels, rotation=45, ha="right")
-        plt.ylabel("Attention")
-        plt.title(f"{sample_name} - Global Branch Attention")
+    fig_w = max(14, 3 * max_imgs + 5)
+    fig_h = 10
+    fig = plt.figure(figsize=(fig_w, fig_h))
 
-    plt.tight_layout()
+    outer = gridspec.GridSpec(
+        2, 2,
+        width_ratios=[max_imgs, 1.8],
+        height_ratios=[1, 1],
+        wspace=0.25,
+        hspace=0.45
+    )
+
+    is_wrong = (gt_cls != pred_cls)
+    title_color = "red" if is_wrong else "black"
+
+    fig.suptitle(
+        f"Sample: {sample_name}\nGT: {gt_cls} | Pred: {pred_cls} | Conf: {conf:.4f}",
+        fontsize=16,
+        y=0.98,
+        color=title_color
+    )
+
+    def plot_branch(branch_rows, branch_imgs, row_idx, branch_name):
+        img_spec = gridspec.GridSpecFromSubplotSpec(
+            1, max(len(branch_rows), 1),
+            subplot_spec=outer[row_idx, 0],
+            wspace=0.15
+        )
+
+        if len(branch_rows) == 0:
+            ax = fig.add_subplot(img_spec[0, 0])
+            ax.axis("off")
+            ax.set_title(f"{branch_name}: no images", fontsize=11)
+        else:
+            for i, (r, img) in enumerate(zip(branch_rows, branch_imgs)):
+                ax = fig.add_subplot(img_spec[0, i])
+                ax.imshow(img)
+                ax.axis("off")
+                ax.set_title(
+                    f'{r["image_name"]}\nFOV={r["fov"]}\nattn={r["attention_weight"]:.3f}',
+                    fontsize=9
+                )
+
+        ax_bar = fig.add_subplot(outer[row_idx, 1])
+        if len(branch_rows) == 0:
+            ax_bar.text(0.5, 0.5, "No images", ha="center", va="center")
+            ax_bar.set_axis_off()
+        else:
+            labels = [f'{r["image_name"]}\n(FOV={r["fov"]})' for r in branch_rows]
+            values = [r["attention_weight"] for r in branch_rows]
+            ax_bar.bar(range(len(values)), values)
+            ax_bar.set_xticks(range(len(values)))
+            ax_bar.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+            ax_bar.set_ylabel("Attention")
+            ax_bar.set_title(f"{branch_name} Attention")
+
+    plot_branch(local_rows, local_imgs, 0, "Local")
+    plot_branch(global_rows, global_imgs, 1, "Global")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
     save_path = os.path.join(save_dir, f"{sample_name}_attention.png")
     plt.savefig(save_path, dpi=200)
-    plt.close()
+    plt.close(fig)
 
 
 @torch.no_grad()
@@ -188,10 +268,13 @@ def main():
             pred_idx = preds[i].item()
             conf = confs[i].item()
 
+            gt_cls_name = IDX2LABEL[gt_idx]
+            pred_cls_name = IDX2LABEL[pred_idx]
+
             pred_row = {
                 "sample_name": sample_name,
-                "gt_cls": IDX2LABEL[gt_idx],
-                "pred_cls": IDX2LABEL[pred_idx],
+                "gt_cls": gt_cls_name,
+                "pred_cls": pred_cls_name,
                 "conf": conf,
                 "correct": int(gt_idx == pred_idx),
                 "pred_head": INFER_PRED_HEAD,
@@ -223,8 +306,8 @@ def main():
                 meta_item = local_items[j]
                 row = {
                     "sample_name": sample_name,
-                    "gt_cls": IDX2LABEL[gt_idx],
-                    "pred_cls": IDX2LABEL[pred_idx],
+                    "gt_cls": gt_cls_name,
+                    "pred_cls": pred_cls_name,
                     "branch": "local",
                     "image_name": meta_item["image_name"],
                     "fov": meta_item["fov"],
@@ -238,8 +321,8 @@ def main():
                 meta_item = global_items[j]
                 row = {
                     "sample_name": sample_name,
-                    "gt_cls": IDX2LABEL[gt_idx],
-                    "pred_cls": IDX2LABEL[pred_idx],
+                    "gt_cls": gt_cls_name,
+                    "pred_cls": pred_cls_name,
                     "branch": "global",
                     "image_name": meta_item["image_name"],
                     "fov": meta_item["fov"],
@@ -248,7 +331,15 @@ def main():
                 all_attn_rows.append(row)
                 sample_attn_rows.append(row)
 
-            save_attention_bar_chart(sample_name, sample_attn_rows, ATTN_FIG_DIR)
+            save_attention_visual_figure(
+                sample_dir=sample_dir,
+                sample_name=sample_name,
+                gt_cls=gt_cls_name,
+                pred_cls=pred_cls_name,
+                conf=conf,
+                rows=sample_attn_rows,
+                save_dir=ATTN_FIG_DIR
+            )
 
     pred_fieldnames = [
         "sample_name", "gt_cls", "pred_cls", "conf", "correct", "pred_head",
