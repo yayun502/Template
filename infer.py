@@ -19,7 +19,8 @@ from configs.config import (
     SAVE_DIR, BEST_MODEL_NAME,
     INFER_DIR, TEST_PRED_CSV, TEST_CM_PNG,
     ATTN_CSV, ATTN_FIG_DIR,
-    INFER_PRED_HEAD
+    INFER_PRED_HEAD,
+    USE_BRANCH_GATE, BRANCH_GATE_MODE
 )
 from data.dataset import DefectSampleDataset, get_sample_dirs
 from models.defect_model import DefectClassifier
@@ -48,9 +49,6 @@ def save_confusion_matrix(cm, class_names, save_path):
 
 
 def load_sample_meta(sample_dir, local_fov_threshold, max_local, max_global):
-    """
-    與 dataset.py 完全共用相同的排序 / fallback / truncate 邏輯。
-    """
     local_items, global_items = load_and_prepare_sample_items(
         sample_dir=sample_dir,
         local_fov_threshold=local_fov_threshold,
@@ -61,9 +59,6 @@ def load_sample_meta(sample_dir, local_fov_threshold, max_local, max_global):
 
 
 def load_display_images(sample_dir, items):
-    """
-    載入原始圖片供 figure 顯示，不經過 dataset transform。
-    """
     images = []
     for item in items:
         img_path = os.path.join(sample_dir, item["image_name"])
@@ -78,27 +73,11 @@ def save_attention_visual_figure(
     gt_cls,
     pred_cls,
     conf,
+    branch_local_weight,
+    branch_global_weight,
     rows,
     save_dir
 ):
-    """
-    rows: list of dicts
-      {
-        "sample_name": ...,
-        "gt_cls": ...,
-        "pred_cls": ...,
-        "branch": "local" / "global",
-        "image_name": ...,
-        "fov": ...,
-        "attention_weight": ...
-      }
-
-    產出包含：
-      - sample / gt / pred / conf 資訊
-      - local branch 對應圖片 + attention
-      - global branch 對應圖片 + attention
-      - 每個 branch 的 attention bar chart
-    """
     os.makedirs(save_dir, exist_ok=True)
 
     local_rows = [r for r in rows if r["branch"] == "local"]
@@ -128,15 +107,18 @@ def save_attention_visual_figure(
     title_color = "red" if is_wrong else "black"
 
     fig.suptitle(
-        f"Sample: {sample_name}\nGT: {gt_cls} | Pred: {pred_cls} | Conf: {conf:.4f}",
+        f"Sample: {sample_name}\n"
+        f"GT: {gt_cls} | Pred: {pred_cls} | Conf: {conf:.4f}\n"
+        f"Branch Gate: Local={branch_local_weight:.3f} | Global={branch_global_weight:.3f}",
         fontsize=16,
-        y=0.98,
+        y=0.99,
         color=title_color
     )
 
     def plot_branch(branch_rows, branch_imgs, row_idx, branch_name):
         img_spec = gridspec.GridSpecFromSubplotSpec(
-            1, max(len(branch_rows), 1),
+            1,
+            max(len(branch_rows), 1),
             subplot_spec=outer[row_idx, 0],
             wspace=0.15
         )
@@ -151,7 +133,9 @@ def save_attention_visual_figure(
                 ax.imshow(img)
                 ax.axis("off")
                 ax.set_title(
-                    f'{r["image_name"]}\nFOV={r["fov"]}\nattn={r["attention_weight"]:.3f}',
+                    f'{r["image_name"]}\n'
+                    f'FOV={r["fov"]}\n'
+                    f'attn={r["attention_weight"]:.3f}',
                     fontsize=9
                 )
 
@@ -160,18 +144,23 @@ def save_attention_visual_figure(
             ax_bar.text(0.5, 0.5, "No images", ha="center", va="center")
             ax_bar.set_axis_off()
         else:
-            labels = [f'{r["image_name"]}\n(FOV={r["fov"]})' for r in branch_rows]
+            labels = [
+                f'{r["image_name"]}\n(FOV={r["fov"]})'
+                for r in branch_rows
+            ]
             values = [r["attention_weight"] for r in branch_rows]
+
             ax_bar.bar(range(len(values)), values)
             ax_bar.set_xticks(range(len(values)))
             ax_bar.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+            ax_bar.set_ylim(0, max(1.0, max(values) * 1.1))
             ax_bar.set_ylabel("Attention")
             ax_bar.set_title(f"{branch_name} Attention")
 
     plot_branch(local_rows, local_imgs, 0, "Local")
     plot_branch(global_rows, global_imgs, 1, "Global")
 
-    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    plt.tight_layout(rect=[0, 0, 1, 0.90])
     save_path = os.path.join(save_dir, f"{sample_name}_attention.png")
     plt.savefig(save_path, dpi=200)
     plt.close(fig)
@@ -180,10 +169,12 @@ def save_attention_visual_figure(
 @torch.no_grad()
 def main():
     device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+
     os.makedirs(INFER_DIR, exist_ok=True)
     os.makedirs(ATTN_FIG_DIR, exist_ok=True)
 
     test_dirs = get_sample_dirs(TEST_DIR)
+
     test_dataset = DefectSampleDataset(
         sample_dirs=test_dirs,
         label_map=LABEL_MAP,
@@ -209,7 +200,9 @@ def main():
         pretrained_path=LOCAL_PRETRAINED_PATH,
         feat_dim=FEAT_DIM,
         num_classes=NUM_CLASSES,
-        dino_repo_dir=DINO_REPO_DIR if BACKBONE_TYPE == "dinov2_local" else None
+        dino_repo_dir=DINO_REPO_DIR if BACKBONE_TYPE == "dinov2_local" else None,
+        use_branch_gate=USE_BRANCH_GATE,
+        branch_gate_mode=BRANCH_GATE_MODE
     ).to(device)
 
     ckpt_path = os.path.join(SAVE_DIR, BEST_MODEL_NAME)
@@ -257,6 +250,8 @@ def main():
 
         local_attn = outputs["local_attn"].cpu()
         global_attn = outputs["global_attn"].cpu()
+        branch_weights = outputs["branch_weights"].cpu()
+
         local_mask_cpu = local_mask.cpu()
         global_mask_cpu = global_mask.cpu()
 
@@ -266,10 +261,13 @@ def main():
 
             gt_idx = labels[i].item()
             pred_idx = preds[i].item()
-            conf = confs[i].item()
+            conf = float(confs[i].item())
 
             gt_cls_name = IDX2LABEL[gt_idx]
             pred_cls_name = IDX2LABEL[pred_idx]
+
+            branch_local_weight = float(branch_weights[i, 0].item())
+            branch_global_weight = float(branch_weights[i, 1].item())
 
             pred_row = {
                 "sample_name": sample_name,
@@ -280,13 +278,21 @@ def main():
                 "pred_head": INFER_PRED_HEAD,
                 "p_np": float(p_np[i].item()),
                 "p_single": float(p_single[i].item()),
-                "p_bp": float(p_bp[i].item())
+                "p_bp": float(p_bp[i].item()),
+                "branch_local_weight": branch_local_weight,
+                "branch_global_weight": branch_global_weight,
             }
 
             for cls_idx in range(NUM_CLASSES):
-                pred_row[f"main_prob_{IDX2LABEL[cls_idx]}"] = float(main_probs[i, cls_idx].item())
-                pred_row[f"hier_prob_{IDX2LABEL[cls_idx]}"] = float(hier_probs[i, cls_idx].item())
-                pred_row[f"final_prob_{IDX2LABEL[cls_idx]}"] = float(final_probs[i, cls_idx].item())
+                pred_row[f"main_prob_{IDX2LABEL[cls_idx]}"] = float(
+                    main_probs[i, cls_idx].item()
+                )
+                pred_row[f"hier_prob_{IDX2LABEL[cls_idx]}"] = float(
+                    hier_probs[i, cls_idx].item()
+                )
+                pred_row[f"final_prob_{IDX2LABEL[cls_idx]}"] = float(
+                    final_probs[i, cls_idx].item()
+                )
 
             all_pred_rows.append(pred_row)
             y_true.append(gt_idx)
@@ -311,7 +317,8 @@ def main():
                     "branch": "local",
                     "image_name": meta_item["image_name"],
                     "fov": meta_item["fov"],
-                    "attention_weight": float(local_attn[i, j].item())
+                    "attention_weight": float(local_attn[i, j].item()),
+                    "branch_weight": branch_local_weight,
                 }
                 all_attn_rows.append(row)
                 sample_attn_rows.append(row)
@@ -326,7 +333,8 @@ def main():
                     "branch": "global",
                     "image_name": meta_item["image_name"],
                     "fov": meta_item["fov"],
-                    "attention_weight": float(global_attn[i, j].item())
+                    "attention_weight": float(global_attn[i, j].item()),
+                    "branch_weight": branch_global_weight,
                 }
                 all_attn_rows.append(row)
                 sample_attn_rows.append(row)
@@ -337,17 +345,38 @@ def main():
                 gt_cls=gt_cls_name,
                 pred_cls=pred_cls_name,
                 conf=conf,
+                branch_local_weight=branch_local_weight,
+                branch_global_weight=branch_global_weight,
                 rows=sample_attn_rows,
                 save_dir=ATTN_FIG_DIR
             )
 
     pred_fieldnames = [
-        "sample_name", "gt_cls", "pred_cls", "conf", "correct", "pred_head",
-        "p_np", "p_single", "p_bp"
+        "sample_name",
+        "gt_cls",
+        "pred_cls",
+        "conf",
+        "correct",
+        "pred_head",
+        "p_np",
+        "p_single",
+        "p_bp",
+        "branch_local_weight",
+        "branch_global_weight",
     ]
-    pred_fieldnames += [f"main_prob_{IDX2LABEL[i]}" for i in range(NUM_CLASSES)]
-    pred_fieldnames += [f"hier_prob_{IDX2LABEL[i]}" for i in range(NUM_CLASSES)]
-    pred_fieldnames += [f"final_prob_{IDX2LABEL[i]}" for i in range(NUM_CLASSES)]
+
+    pred_fieldnames += [
+        f"main_prob_{IDX2LABEL[i]}"
+        for i in range(NUM_CLASSES)
+    ]
+    pred_fieldnames += [
+        f"hier_prob_{IDX2LABEL[i]}"
+        for i in range(NUM_CLASSES)
+    ]
+    pred_fieldnames += [
+        f"final_prob_{IDX2LABEL[i]}"
+        for i in range(NUM_CLASSES)
+    ]
 
     with open(TEST_PRED_CSV, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=pred_fieldnames)
@@ -355,8 +384,14 @@ def main():
         writer.writerows(all_pred_rows)
 
     attn_fieldnames = [
-        "sample_name", "gt_cls", "pred_cls",
-        "branch", "image_name", "fov", "attention_weight"
+        "sample_name",
+        "gt_cls",
+        "pred_cls",
+        "branch",
+        "image_name",
+        "fov",
+        "attention_weight",
+        "branch_weight",
     ]
 
     with open(ATTN_CSV, "w", newline="", encoding="utf-8-sig") as f:
