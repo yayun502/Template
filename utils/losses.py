@@ -1,6 +1,11 @@
 import torch
 import torch.nn.functional as F
-from utils.hierarchical import hierarchical_nll_loss, build_gate_targets
+
+from utils.hierarchical import (
+    hierarchical_nll_loss,
+    vanilla_gate_loss,
+    conditional_gate_loss
+)
 
 
 def multiclass_focal_loss(
@@ -37,7 +42,7 @@ def branch_entropy_regularization(branch_weights):
     branch_weights: [B, 2]
 
     回傳 -entropy。
-    加到 total loss 後，會鼓勵 entropy 變大，避免 gate 太早 collapse。
+    加到 total loss 後，會鼓勵 entropy 變大，避免 branch gate 太早 collapse。
     """
     eps = 1e-8
     entropy = -torch.sum(
@@ -55,11 +60,16 @@ def compute_total_loss(
     cls_loss_type="ce",
     focal_gamma=2.0,
     use_hierarchical=False,
-    hier_loss_weight=0.5,
+    hier_loss_weight=0.0,
     gate_loss_weight=0.3,
+    use_conditional_gate_loss=True,
+    gate_np_weight=0.5,
+    gate_single_weight=1.0,
+    gate_bp_weight=1.0,
     use_branch_entropy_reg=False,
     branch_entropy_weight=0.01
 ):
+    # ----- Main 4-class loss -----
     if cls_loss_type == "ce":
         cls_loss = F.cross_entropy(
             outputs["logits"],
@@ -81,24 +91,48 @@ def compute_total_loss(
 
     total_loss = cls_loss
 
-    hier_loss = torch.tensor(0.0, device=class_labels.device)
-    gate_loss = torch.tensor(0.0, device=class_labels.device)
-    branch_entropy_loss = torch.tensor(0.0, device=class_labels.device)
+    device = class_labels.device
+
+    hier_loss = torch.tensor(0.0, device=device)
+    gate_loss = torch.tensor(0.0, device=device)
+    np_gate_loss = torch.tensor(0.0, device=device)
+    single_gate_loss = torch.tensor(0.0, device=device)
+    bp_gate_loss = torch.tensor(0.0, device=device)
+    branch_entropy_loss = torch.tensor(0.0, device=device)
 
     if use_hierarchical:
+        # Hierarchical NLL loss
+        # 若 hier_loss_weight = 0，這項仍會被算出來方便 log，
+        # 但不會影響 total loss。
         hier_loss = hierarchical_nll_loss(
             outputs["hier_logits"],
             class_labels,
             class_weights=class_weights
         )
 
-        gate_targets = build_gate_targets(class_labels)
-        gate_loss = F.binary_cross_entropy_with_logits(
-            outputs["hier_logits"],
-            gate_targets
-        )
+        # Gate loss
+        if use_conditional_gate_loss:
+            gate_loss, np_gate_loss, single_gate_loss, bp_gate_loss = conditional_gate_loss(
+                hier_logits=outputs["hier_logits"],
+                class_labels=class_labels,
+                np_weight=gate_np_weight,
+                single_weight=gate_single_weight,
+                bp_weight=gate_bp_weight
+            )
+        else:
+            gate_loss, np_gate_loss, single_gate_loss, bp_gate_loss = vanilla_gate_loss(
+                hier_logits=outputs["hier_logits"],
+                class_labels=class_labels,
+                np_weight=gate_np_weight,
+                single_weight=gate_single_weight,
+                bp_weight=gate_bp_weight
+            )
 
-        total_loss = total_loss + hier_loss_weight * hier_loss + gate_loss_weight * gate_loss
+        total_loss = (
+            total_loss
+            + hier_loss_weight * hier_loss
+            + gate_loss_weight * gate_loss
+        )
 
     if use_branch_entropy_reg:
         branch_entropy_loss = branch_entropy_regularization(
@@ -106,4 +140,13 @@ def compute_total_loss(
         )
         total_loss = total_loss + branch_entropy_weight * branch_entropy_loss
 
-    return total_loss, cls_loss, hier_loss, gate_loss, branch_entropy_loss
+    return {
+        "total_loss": total_loss,
+        "cls_loss": cls_loss,
+        "hier_loss": hier_loss,
+        "gate_loss": gate_loss,
+        "np_gate_loss": np_gate_loss,
+        "single_gate_loss": single_gate_loss,
+        "bp_gate_loss": bp_gate_loss,
+        "branch_entropy_loss": branch_entropy_loss
+    }
