@@ -22,7 +22,6 @@ NUM_WORKERS = 4
 BATCH_SIZE = 8
 
 # ========= Backbone =========
-# "resnet50_local" / "dinov2_local" / "timm"
 BACKBONE_TYPE = "dinov2_local"
 BACKBONE_NAME = "dinov2_vitb14"
 DINO_REPO_DIR = "./third_party/dinov2"
@@ -45,21 +44,30 @@ CLASS_WEIGHTS = [1.0, 2.0, 2.0, 1.5]
 CLS_LOSS_TYPE = "focal"   # "ce" or "focal"
 FOCAL_GAMMA = 2.0
 
-# ========= Hierarchical Head =========
+# ========= Hierarchical / Gate =========
 USE_HIERARCHICAL_HEAD = True
-HIER_LOSS_WEIGHT = 0.5
+
+# 建議你先嘗試 A 時設成 0.0
+# 也就是不使用 hierarchical tree NLL，只保留 gate supervision
+HIER_LOSS_WEIGHT = 0.0
+
 GATE_LOSS_WEIGHT = 0.3
+
+# 方案 B：conditional gate loss
+USE_CONDITIONAL_GATE_LOSS = True
+
+# 各 gate 權重
+# 若擔心 NP gate 太主導，可以把 NP 權重設低一點
+GATE_NP_WEIGHT = 0.5
+GATE_SINGLE_WEIGHT = 1.0
+GATE_BP_WEIGHT = 1.0
+
 INFER_PRED_HEAD = "main"  # "main" or "hier"
 
 # ========= Branch Gate =========
 USE_BRANCH_GATE = True
+BRANCH_GATE_MODE = "residual"  # "direct" or "residual"
 
-# "direct": local_w * local_feat, global_w * global_feat
-# "residual": (0.5 + local_w) * local_feat, (0.5 + global_w) * global_feat
-BRANCH_GATE_MODE = "residual"
-
-# entropy regularization:
-# 若啟用，會鼓勵 branch gate 不要太早 collapse 到單邊
 USE_BRANCH_ENTROPY_REG = False
 BRANCH_ENTROPY_WEIGHT = 0.01
 
