@@ -1,29 +1,24 @@
 # Main change for this branch
-- Branch gate：branch-level attention，在 local feature 和 global feature 之間決定權重
+- Conditional gate loss
   
 # Overview
-## 架構
+## 概念
+如果只是普通 gate loss：
 ```
-local images  ── encoder ── local attention pooling  ── local_feat
-                                                          │
-                                                          ├── branch gate ── local_weight
-                                                          │
-global images ─ encoder ── global attention pooling ── global_feat
-                                                          │
-                                                          └── branch gate ── global_weight
-
-weighted_local = local_weight * local_feat
-weighted_global = global_weight * global_feat
-
-concat(weighted_local, weighted_global)
-        │
-fusion
-        │
-main head + hierarchical head
+is_np
+is_single
+has_breakpoint
 ```
-- `branch-level gate`
-- `direct / residual` 可選
-- `branch_weights` 輸出
-- attention figure 顯示 `Local / Global branch weight`
-- optional entropy regularization，可用 config 開關控制
+確實會有點像把原本 4-class label 展開成 3 個 binary label。
+但它還是有一點價值，因為它會迫使模型學到比較語意化的中間判斷。
+
+不過你擔心的是對的：普通 gate loss 不夠像真正 flow chart。
+
+所以我更建議用 conditional gate loss：
+```
+NP gate：所有樣本都算
+Single gate：只在 non-NP 樣本上算
+Breakpoint gate：只在 non-NP 且 non-Single 樣本上算
+```
+這樣它就不是單純 label extension，而是比較真的在模擬人類判斷順序。
 
