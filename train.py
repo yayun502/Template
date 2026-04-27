@@ -19,6 +19,8 @@ from configs.config import (
     USE_CLASS_WEIGHTS, CLASS_WEIGHTS,
     CLS_LOSS_TYPE, FOCAL_GAMMA,
     USE_HIERARCHICAL_HEAD, HIER_LOSS_WEIGHT, GATE_LOSS_WEIGHT,
+    USE_CONDITIONAL_GATE_LOSS,
+    GATE_NP_WEIGHT, GATE_SINGLE_WEIGHT, GATE_BP_WEIGHT,
     USE_BRANCH_GATE, BRANCH_GATE_MODE,
     USE_BRANCH_ENTROPY_REG, BRANCH_ENTROPY_WEIGHT,
     SCHEDULER_TYPE,
@@ -45,11 +47,17 @@ def init_train_log(csv_path):
                 "train_cls_loss",
                 "train_hier_loss",
                 "train_gate_loss",
+                "train_np_gate_loss",
+                "train_single_gate_loss",
+                "train_bp_gate_loss",
                 "train_branch_entropy_loss",
                 "val_loss",
                 "val_cls_loss",
                 "val_hier_loss",
                 "val_gate_loss",
+                "val_np_gate_loss",
+                "val_single_gate_loss",
+                "val_bp_gate_loss",
                 "val_branch_entropy_loss",
                 "val_acc"
             ])
@@ -66,7 +74,11 @@ def build_scheduler(optimizer):
         return None
 
     if SCHEDULER_TYPE == "step":
-        return StepLR(optimizer, step_size=STEP_SIZE, gamma=STEP_GAMMA)
+        return StepLR(
+            optimizer,
+            step_size=STEP_SIZE,
+            gamma=STEP_GAMMA
+        )
 
     if SCHEDULER_TYPE == "cosine":
         return CosineAnnealingLR(
@@ -86,6 +98,19 @@ def build_scheduler(optimizer):
     raise ValueError(f"Unsupported scheduler type: {SCHEDULER_TYPE}")
 
 
+def empty_loss_meter():
+    return {
+        "loss": 0.0,
+        "cls_loss": 0.0,
+        "hier_loss": 0.0,
+        "gate_loss": 0.0,
+        "np_gate_loss": 0.0,
+        "single_gate_loss": 0.0,
+        "bp_gate_loss": 0.0,
+        "branch_entropy_loss": 0.0,
+    }
+
+
 def run_one_epoch(
     model,
     loader,
@@ -96,8 +121,12 @@ def run_one_epoch(
     cls_loss_type="ce",
     focal_gamma=2.0,
     use_hierarchical=False,
-    hier_loss_weight=0.5,
+    hier_loss_weight=0.0,
     gate_loss_weight=0.3,
+    use_conditional_gate_loss=True,
+    gate_np_weight=0.5,
+    gate_single_weight=1.0,
+    gate_bp_weight=1.0,
     use_branch_entropy_reg=False,
     branch_entropy_weight=0.01
 ):
@@ -108,12 +137,7 @@ def run_one_epoch(
         model.eval()
         desc = "Val"
 
-    total_loss = 0.0
-    total_cls_loss = 0.0
-    total_hier_loss = 0.0
-    total_gate_loss = 0.0
-    total_branch_entropy_loss = 0.0
-
+    meter = empty_loss_meter()
     y_true = []
     y_pred = []
 
@@ -134,7 +158,7 @@ def run_one_epoch(
                 global_mask=global_mask
             )
 
-            loss, cls_loss, hier_loss, gate_loss, branch_entropy_loss = compute_total_loss(
+            losses = compute_total_loss(
                 outputs=outputs,
                 class_labels=labels,
                 class_weights=class_weights,
@@ -143,9 +167,15 @@ def run_one_epoch(
                 use_hierarchical=use_hierarchical,
                 hier_loss_weight=hier_loss_weight,
                 gate_loss_weight=gate_loss_weight,
+                use_conditional_gate_loss=use_conditional_gate_loss,
+                gate_np_weight=gate_np_weight,
+                gate_single_weight=gate_single_weight,
+                gate_bp_weight=gate_bp_weight,
                 use_branch_entropy_reg=use_branch_entropy_reg,
                 branch_entropy_weight=branch_entropy_weight
             )
+
+            loss = losses["total_loss"]
 
             if is_train:
                 optimizer.zero_grad()
@@ -154,23 +184,20 @@ def run_one_epoch(
 
             preds = torch.argmax(outputs["logits"], dim=1)
 
-            total_loss += loss.item()
-            total_cls_loss += cls_loss.item()
-            total_hier_loss += hier_loss.item()
-            total_gate_loss += gate_loss.item()
-            total_branch_entropy_loss += branch_entropy_loss.item()
+            meter["loss"] += losses["total_loss"].item()
+            meter["cls_loss"] += losses["cls_loss"].item()
+            meter["hier_loss"] += losses["hier_loss"].item()
+            meter["gate_loss"] += losses["gate_loss"].item()
+            meter["np_gate_loss"] += losses["np_gate_loss"].item()
+            meter["single_gate_loss"] += losses["single_gate_loss"].item()
+            meter["bp_gate_loss"] += losses["bp_gate_loss"].item()
+            meter["branch_entropy_loss"] += losses["branch_entropy_loss"].item()
 
             y_true.extend(labels.cpu().tolist())
             y_pred.extend(preds.cpu().tolist())
 
     n = len(loader)
-    stats = {
-        "loss": total_loss / n,
-        "cls_loss": total_cls_loss / n,
-        "hier_loss": total_hier_loss / n,
-        "gate_loss": total_gate_loss / n,
-        "branch_entropy_loss": total_branch_entropy_loss / n
-    }
+    stats = {k: v / n for k, v in meter.items()}
 
     if not is_train:
         stats["metrics"] = compute_classification_metrics(
@@ -256,11 +283,15 @@ def main():
         class_weights = None
 
     print(f"Backbone: {BACKBONE_TYPE} / {BACKBONE_NAME}")
+    print(f"Use hierarchical head: {USE_HIERARCHICAL_HEAD}")
+    print(f"Hier loss weight: {HIER_LOSS_WEIGHT}")
+    print(f"Gate loss weight: {GATE_LOSS_WEIGHT}")
+    print(f"Use conditional gate loss: {USE_CONDITIONAL_GATE_LOSS}")
+    print(f"Gate weights: NP={GATE_NP_WEIGHT}, Single={GATE_SINGLE_WEIGHT}, BP={GATE_BP_WEIGHT}")
     print(f"Use branch gate: {USE_BRANCH_GATE}")
     print(f"Branch gate mode: {BRANCH_GATE_MODE}")
     print(f"Use branch entropy reg: {USE_BRANCH_ENTROPY_REG}")
     print(f"Branch entropy weight: {BRANCH_ENTROPY_WEIGHT}")
-    print(f"Use hierarchical head: {USE_HIERARCHICAL_HEAD}")
     print(f"Loss type: {CLS_LOSS_TYPE}")
     print(f"Scheduler: {SCHEDULER_TYPE}")
     print(f"Class weights: {class_weights}")
@@ -282,6 +313,10 @@ def main():
             use_hierarchical=USE_HIERARCHICAL_HEAD,
             hier_loss_weight=HIER_LOSS_WEIGHT,
             gate_loss_weight=GATE_LOSS_WEIGHT,
+            use_conditional_gate_loss=USE_CONDITIONAL_GATE_LOSS,
+            gate_np_weight=GATE_NP_WEIGHT,
+            gate_single_weight=GATE_SINGLE_WEIGHT,
+            gate_bp_weight=GATE_BP_WEIGHT,
             use_branch_entropy_reg=USE_BRANCH_ENTROPY_REG,
             branch_entropy_weight=BRANCH_ENTROPY_WEIGHT
         )
@@ -298,6 +333,10 @@ def main():
             use_hierarchical=USE_HIERARCHICAL_HEAD,
             hier_loss_weight=HIER_LOSS_WEIGHT,
             gate_loss_weight=GATE_LOSS_WEIGHT,
+            use_conditional_gate_loss=USE_CONDITIONAL_GATE_LOSS,
+            gate_np_weight=GATE_NP_WEIGHT,
+            gate_single_weight=GATE_SINGLE_WEIGHT,
+            gate_bp_weight=GATE_BP_WEIGHT,
             use_branch_entropy_reg=USE_BRANCH_ENTROPY_REG,
             branch_entropy_weight=BRANCH_ENTROPY_WEIGHT
         )
@@ -318,6 +357,9 @@ def main():
             f"Cls: {train_stats['cls_loss']:.4f} | "
             f"Hier: {train_stats['hier_loss']:.4f} | "
             f"Gate: {train_stats['gate_loss']:.4f} | "
+            f"NP: {train_stats['np_gate_loss']:.4f} | "
+            f"Single: {train_stats['single_gate_loss']:.4f} | "
+            f"BP: {train_stats['bp_gate_loss']:.4f} | "
             f"BranchEnt: {train_stats['branch_entropy_loss']:.4f}"
         )
         print(
@@ -325,6 +367,9 @@ def main():
             f"Cls: {val_stats['cls_loss']:.4f} | "
             f"Hier: {val_stats['hier_loss']:.4f} | "
             f"Gate: {val_stats['gate_loss']:.4f} | "
+            f"NP: {val_stats['np_gate_loss']:.4f} | "
+            f"Single: {val_stats['single_gate_loss']:.4f} | "
+            f"BP: {val_stats['bp_gate_loss']:.4f} | "
             f"BranchEnt: {val_stats['branch_entropy_loss']:.4f}"
         )
         print(f"Val Acc: {val_acc:.4f}")
@@ -338,11 +383,17 @@ def main():
             train_stats["cls_loss"],
             train_stats["hier_loss"],
             train_stats["gate_loss"],
+            train_stats["np_gate_loss"],
+            train_stats["single_gate_loss"],
+            train_stats["bp_gate_loss"],
             train_stats["branch_entropy_loss"],
             val_stats["loss"],
             val_stats["cls_loss"],
             val_stats["hier_loss"],
             val_stats["gate_loss"],
+            val_stats["np_gate_loss"],
+            val_stats["single_gate_loss"],
+            val_stats["bp_gate_loss"],
             val_stats["branch_entropy_loss"],
             val_acc
         ])
