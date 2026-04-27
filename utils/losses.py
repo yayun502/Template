@@ -10,11 +10,6 @@ def multiclass_focal_loss(
     alpha=None,
     reduction="mean"
 ):
-    """
-    logits:  [B, C]
-    targets: [B]
-    alpha:   [C] or None
-    """
     log_probs = F.log_softmax(logits, dim=1)
     probs = torch.exp(log_probs)
 
@@ -34,8 +29,23 @@ def multiclass_focal_loss(
         return loss.mean()
     elif reduction == "sum":
         return loss.sum()
-    else:
-        return loss
+    return loss
+
+
+def branch_entropy_regularization(branch_weights):
+    """
+    branch_weights: [B, 2]
+
+    回傳 -entropy。
+    加到 total loss 後，會鼓勵 entropy 變大，避免 gate 太早 collapse。
+    """
+    eps = 1e-8
+    entropy = -torch.sum(
+        branch_weights * torch.log(branch_weights + eps),
+        dim=1
+    ).mean()
+
+    return -entropy
 
 
 def compute_total_loss(
@@ -46,9 +56,10 @@ def compute_total_loss(
     focal_gamma=2.0,
     use_hierarchical=False,
     hier_loss_weight=0.5,
-    gate_loss_weight=0.3
+    gate_loss_weight=0.3,
+    use_branch_entropy_reg=False,
+    branch_entropy_weight=0.01
 ):
-    # ----- 原本 4-class main loss -----
     if cls_loss_type == "ce":
         cls_loss = F.cross_entropy(
             outputs["logits"],
@@ -72,6 +83,7 @@ def compute_total_loss(
 
     hier_loss = torch.tensor(0.0, device=class_labels.device)
     gate_loss = torch.tensor(0.0, device=class_labels.device)
+    branch_entropy_loss = torch.tensor(0.0, device=class_labels.device)
 
     if use_hierarchical:
         hier_loss = hierarchical_nll_loss(
@@ -88,4 +100,10 @@ def compute_total_loss(
 
         total_loss = total_loss + hier_loss_weight * hier_loss + gate_loss_weight * gate_loss
 
-    return total_loss, cls_loss, hier_loss, gate_loss
+    if use_branch_entropy_reg:
+        branch_entropy_loss = branch_entropy_regularization(
+            outputs["branch_weights"]
+        )
+        total_loss = total_loss + branch_entropy_weight * branch_entropy_loss
+
+    return total_loss, cls_loss, hier_loss, gate_loss, branch_entropy_loss
