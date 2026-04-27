@@ -21,4 +21,9 @@ fusion
         │
 main head + hierarchical head
 ```
+- `branch-level gate`
+- `direct / residual` 可選
+- `branch_weights` 輸出
+- attention figure 顯示 `Local / Global branch weight`
+- optional entropy regularization，可用 config 開關控制
 
