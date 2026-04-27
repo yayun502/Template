@@ -19,6 +19,8 @@ from configs.config import (
     USE_CLASS_WEIGHTS, CLASS_WEIGHTS,
     CLS_LOSS_TYPE, FOCAL_GAMMA,
     USE_HIERARCHICAL_HEAD, HIER_LOSS_WEIGHT, GATE_LOSS_WEIGHT,
+    USE_BRANCH_GATE, BRANCH_GATE_MODE,
+    USE_BRANCH_ENTROPY_REG, BRANCH_ENTROPY_WEIGHT,
     SCHEDULER_TYPE,
     STEP_SIZE, STEP_GAMMA,
     PLATEAU_MODE, PLATEAU_FACTOR, PLATEAU_PATIENCE,
@@ -43,10 +45,12 @@ def init_train_log(csv_path):
                 "train_cls_loss",
                 "train_hier_loss",
                 "train_gate_loss",
+                "train_branch_entropy_loss",
                 "val_loss",
                 "val_cls_loss",
                 "val_hier_loss",
                 "val_gate_loss",
+                "val_branch_entropy_loss",
                 "val_acc"
             ])
 
@@ -59,155 +63,123 @@ def append_train_log(csv_path, row):
 
 def build_scheduler(optimizer):
     if SCHEDULER_TYPE == "none":
-        scheduler = None
-    elif SCHEDULER_TYPE == "step":
-        scheduler = StepLR(optimizer, step_size=STEP_SIZE, gamma=STEP_GAMMA)
-    elif SCHEDULER_TYPE == "cosine":
-        scheduler = CosineAnnealingLR(optimizer, T_max=COSINE_T_MAX, eta_min=COSINE_ETA_MIN)
-    elif SCHEDULER_TYPE == "plateau":
-        scheduler = ReduceLROnPlateau(
+        return None
+
+    if SCHEDULER_TYPE == "step":
+        return StepLR(optimizer, step_size=STEP_SIZE, gamma=STEP_GAMMA)
+
+    if SCHEDULER_TYPE == "cosine":
+        return CosineAnnealingLR(
+            optimizer,
+            T_max=COSINE_T_MAX,
+            eta_min=COSINE_ETA_MIN
+        )
+
+    if SCHEDULER_TYPE == "plateau":
+        return ReduceLROnPlateau(
             optimizer,
             mode=PLATEAU_MODE,
             factor=PLATEAU_FACTOR,
             patience=PLATEAU_PATIENCE
         )
-    else:
-        raise ValueError(f"Unsupported scheduler type: {SCHEDULER_TYPE}")
-    return scheduler
+
+    raise ValueError(f"Unsupported scheduler type: {SCHEDULER_TYPE}")
 
 
-def train_one_epoch(
+def run_one_epoch(
     model,
     loader,
     optimizer,
     device,
+    is_train,
     class_weights=None,
     cls_loss_type="ce",
     focal_gamma=2.0,
     use_hierarchical=False,
     hier_loss_weight=0.5,
-    gate_loss_weight=0.3
+    gate_loss_weight=0.3,
+    use_branch_entropy_reg=False,
+    branch_entropy_weight=0.01
 ):
-    model.train()
+    if is_train:
+        model.train()
+        desc = "Train"
+    else:
+        model.eval()
+        desc = "Val"
 
     total_loss = 0.0
     total_cls_loss = 0.0
     total_hier_loss = 0.0
     total_gate_loss = 0.0
-
-    for batch in tqdm(loader, desc="Train", leave=False):
-        local_imgs = batch["local_imgs"].to(device)
-        global_imgs = batch["global_imgs"].to(device)
-        local_mask = batch["local_mask"].to(device)
-        global_mask = batch["global_mask"].to(device)
-        labels = batch["label"].to(device)
-
-        outputs = model(
-            local_imgs=local_imgs,
-            global_imgs=global_imgs,
-            local_mask=local_mask,
-            global_mask=global_mask
-        )
-
-        loss, cls_loss, hier_loss, gate_loss = compute_total_loss(
-            outputs=outputs,
-            class_labels=labels,
-            class_weights=class_weights,
-            cls_loss_type=cls_loss_type,
-            focal_gamma=focal_gamma,
-            use_hierarchical=use_hierarchical,
-            hier_loss_weight=hier_loss_weight,
-            gate_loss_weight=gate_loss_weight
-        )
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-        total_cls_loss += cls_loss.item()
-        total_hier_loss += hier_loss.item()
-        total_gate_loss += gate_loss.item()
-
-    n = len(loader)
-    return {
-        "loss": total_loss / n,
-        "cls_loss": total_cls_loss / n,
-        "hier_loss": total_hier_loss / n,
-        "gate_loss": total_gate_loss / n
-    }
-
-
-@torch.no_grad()
-def evaluate(
-    model,
-    loader,
-    device,
-    class_weights=None,
-    cls_loss_type="ce",
-    focal_gamma=2.0,
-    use_hierarchical=False,
-    hier_loss_weight=0.5,
-    gate_loss_weight=0.3
-):
-    model.eval()
-
-    total_loss = 0.0
-    total_cls_loss = 0.0
-    total_hier_loss = 0.0
-    total_gate_loss = 0.0
+    total_branch_entropy_loss = 0.0
 
     y_true = []
     y_pred = []
 
-    for batch in tqdm(loader, desc="Val", leave=False):
-        local_imgs = batch["local_imgs"].to(device)
-        global_imgs = batch["global_imgs"].to(device)
-        local_mask = batch["local_mask"].to(device)
-        global_mask = batch["global_mask"].to(device)
-        labels = batch["label"].to(device)
+    context = torch.enable_grad() if is_train else torch.no_grad()
 
-        outputs = model(
-            local_imgs=local_imgs,
-            global_imgs=global_imgs,
-            local_mask=local_mask,
-            global_mask=global_mask
-        )
+    with context:
+        for batch in tqdm(loader, desc=desc, leave=False):
+            local_imgs = batch["local_imgs"].to(device)
+            global_imgs = batch["global_imgs"].to(device)
+            local_mask = batch["local_mask"].to(device)
+            global_mask = batch["global_mask"].to(device)
+            labels = batch["label"].to(device)
 
-        loss, cls_loss, hier_loss, gate_loss = compute_total_loss(
-            outputs=outputs,
-            class_labels=labels,
-            class_weights=class_weights,
-            cls_loss_type=cls_loss_type,
-            focal_gamma=focal_gamma,
-            use_hierarchical=use_hierarchical,
-            hier_loss_weight=hier_loss_weight,
-            gate_loss_weight=gate_loss_weight
-        )
+            outputs = model(
+                local_imgs=local_imgs,
+                global_imgs=global_imgs,
+                local_mask=local_mask,
+                global_mask=global_mask
+            )
 
-        preds = torch.argmax(outputs["logits"], dim=1)
+            loss, cls_loss, hier_loss, gate_loss, branch_entropy_loss = compute_total_loss(
+                outputs=outputs,
+                class_labels=labels,
+                class_weights=class_weights,
+                cls_loss_type=cls_loss_type,
+                focal_gamma=focal_gamma,
+                use_hierarchical=use_hierarchical,
+                hier_loss_weight=hier_loss_weight,
+                gate_loss_weight=gate_loss_weight,
+                use_branch_entropy_reg=use_branch_entropy_reg,
+                branch_entropy_weight=branch_entropy_weight
+            )
 
-        total_loss += loss.item()
-        total_cls_loss += cls_loss.item()
-        total_hier_loss += hier_loss.item()
-        total_gate_loss += gate_loss.item()
+            if is_train:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-        y_true.extend(labels.cpu().tolist())
-        y_pred.extend(preds.cpu().tolist())
+            preds = torch.argmax(outputs["logits"], dim=1)
+
+            total_loss += loss.item()
+            total_cls_loss += cls_loss.item()
+            total_hier_loss += hier_loss.item()
+            total_gate_loss += gate_loss.item()
+            total_branch_entropy_loss += branch_entropy_loss.item()
+
+            y_true.extend(labels.cpu().tolist())
+            y_pred.extend(preds.cpu().tolist())
 
     n = len(loader)
-    metrics = compute_classification_metrics(
-        y_true, y_pred,
-        label_names=[IDX2LABEL[i] for i in range(len(IDX2LABEL))]
-    )
-
-    return {
+    stats = {
         "loss": total_loss / n,
         "cls_loss": total_cls_loss / n,
         "hier_loss": total_hier_loss / n,
         "gate_loss": total_gate_loss / n,
-        "metrics": metrics
+        "branch_entropy_loss": total_branch_entropy_loss / n
     }
+
+    if not is_train:
+        stats["metrics"] = compute_classification_metrics(
+            y_true,
+            y_pred,
+            label_names=[IDX2LABEL[i] for i in range(len(IDX2LABEL))]
+        )
+
+    return stats
 
 
 def main():
@@ -265,59 +237,69 @@ def main():
         pretrained_path=LOCAL_PRETRAINED_PATH,
         feat_dim=FEAT_DIM,
         num_classes=NUM_CLASSES,
-        dino_repo_dir=DINO_REPO_DIR if BACKBONE_TYPE == "dinov2_local" else None
+        dino_repo_dir=DINO_REPO_DIR if BACKBONE_TYPE == "dinov2_local" else None,
+        use_branch_gate=USE_BRANCH_GATE,
+        branch_gate_mode=BRANCH_GATE_MODE
     ).to(device)
 
-    optimizer = AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = AdamW(
+        model.parameters(),
+        lr=LR,
+        weight_decay=WEIGHT_DECAY
+    )
+
     scheduler = build_scheduler(optimizer)
-
-    print(f"Backbone type: {BACKBONE_TYPE}")
-    print(f"Backbone name: {BACKBONE_NAME}")
-    print(f"Scheduler type: {SCHEDULER_TYPE}")
-    print(f"Classification loss type: {CLS_LOSS_TYPE}")
-    if CLS_LOSS_TYPE == "focal":
-        print(f"Focal gamma: {FOCAL_GAMMA}")
-
-    print(f"Use hierarchical head: {USE_HIERARCHICAL_HEAD}")
-    if USE_HIERARCHICAL_HEAD:
-        print(f"Hier loss weight: {HIER_LOSS_WEIGHT}")
-        print(f"Gate loss weight: {GATE_LOSS_WEIGHT}")
 
     if USE_CLASS_WEIGHTS:
         class_weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32).to(device)
-        print(f"Using class weights: {CLASS_WEIGHTS}")
     else:
         class_weights = None
-        print("Not using class weights.")
+
+    print(f"Backbone: {BACKBONE_TYPE} / {BACKBONE_NAME}")
+    print(f"Use branch gate: {USE_BRANCH_GATE}")
+    print(f"Branch gate mode: {BRANCH_GATE_MODE}")
+    print(f"Use branch entropy reg: {USE_BRANCH_ENTROPY_REG}")
+    print(f"Branch entropy weight: {BRANCH_ENTROPY_WEIGHT}")
+    print(f"Use hierarchical head: {USE_HIERARCHICAL_HEAD}")
+    print(f"Loss type: {CLS_LOSS_TYPE}")
+    print(f"Scheduler: {SCHEDULER_TYPE}")
+    print(f"Class weights: {class_weights}")
 
     best_acc = 0.0
 
     for epoch in range(1, EPOCHS + 1):
         print(f"\n===== Epoch {epoch}/{EPOCHS} =====")
 
-        train_stats = train_one_epoch(
+        train_stats = run_one_epoch(
             model=model,
             loader=train_loader,
             optimizer=optimizer,
             device=device,
+            is_train=True,
             class_weights=class_weights,
             cls_loss_type=CLS_LOSS_TYPE,
             focal_gamma=FOCAL_GAMMA,
             use_hierarchical=USE_HIERARCHICAL_HEAD,
             hier_loss_weight=HIER_LOSS_WEIGHT,
-            gate_loss_weight=GATE_LOSS_WEIGHT
+            gate_loss_weight=GATE_LOSS_WEIGHT,
+            use_branch_entropy_reg=USE_BRANCH_ENTROPY_REG,
+            branch_entropy_weight=BRANCH_ENTROPY_WEIGHT
         )
 
-        val_stats = evaluate(
+        val_stats = run_one_epoch(
             model=model,
             loader=val_loader,
+            optimizer=optimizer,
             device=device,
+            is_train=False,
             class_weights=class_weights,
             cls_loss_type=CLS_LOSS_TYPE,
             focal_gamma=FOCAL_GAMMA,
             use_hierarchical=USE_HIERARCHICAL_HEAD,
             hier_loss_weight=HIER_LOSS_WEIGHT,
-            gate_loss_weight=GATE_LOSS_WEIGHT
+            gate_loss_weight=GATE_LOSS_WEIGHT,
+            use_branch_entropy_reg=USE_BRANCH_ENTROPY_REG,
+            branch_entropy_weight=BRANCH_ENTROPY_WEIGHT
         )
 
         val_acc = val_stats["metrics"]["accuracy"]
@@ -335,18 +317,18 @@ def main():
             f"Train Loss: {train_stats['loss']:.4f} | "
             f"Cls: {train_stats['cls_loss']:.4f} | "
             f"Hier: {train_stats['hier_loss']:.4f} | "
-            f"Gate: {train_stats['gate_loss']:.4f}"
+            f"Gate: {train_stats['gate_loss']:.4f} | "
+            f"BranchEnt: {train_stats['branch_entropy_loss']:.4f}"
         )
         print(
-            f"Val Loss:   {val_stats['loss']:.4f} | "
+            f"Val Loss: {val_stats['loss']:.4f} | "
             f"Cls: {val_stats['cls_loss']:.4f} | "
             f"Hier: {val_stats['hier_loss']:.4f} | "
-            f"Gate: {val_stats['gate_loss']:.4f}"
+            f"Gate: {val_stats['gate_loss']:.4f} | "
+            f"BranchEnt: {val_stats['branch_entropy_loss']:.4f}"
         )
         print(f"Val Acc: {val_acc:.4f}")
-        print("Classification Report:")
         print(val_stats["metrics"]["classification_report"])
-        print("Confusion Matrix:")
         print(val_stats["metrics"]["confusion_matrix"])
 
         append_train_log(TRAIN_LOG_CSV, [
@@ -356,10 +338,12 @@ def main():
             train_stats["cls_loss"],
             train_stats["hier_loss"],
             train_stats["gate_loss"],
+            train_stats["branch_entropy_loss"],
             val_stats["loss"],
             val_stats["cls_loss"],
             val_stats["hier_loss"],
             val_stats["gate_loss"],
+            val_stats["branch_entropy_loss"],
             val_acc
         ])
 
