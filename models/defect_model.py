@@ -44,39 +44,31 @@ class ImageEncoder(nn.Module):
     ):
         super().__init__()
 
-        self.backbone_type = backbone_type
-
         if backbone_type == "resnet50_local":
             backbone = models.resnet50(weights=None)
 
             if pretrained_path is not None and os.path.exists(pretrained_path):
                 checkpoint = torch.load(pretrained_path, map_location="cpu")
-                state_dict = extract_state_dict(checkpoint)
-                state_dict = clean_state_dict_keys(state_dict)
-
+                state_dict = clean_state_dict_keys(extract_state_dict(checkpoint))
                 missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
-                print(f"[ImageEncoder] Loaded local pretrained weights from: {pretrained_path}")
+                print(f"[ImageEncoder] Loaded ResNet weights from: {pretrained_path}")
                 print(f"[ImageEncoder] Missing keys: {missing}")
                 print(f"[ImageEncoder] Unexpected keys: {unexpected}")
-            else:
-                print("[ImageEncoder] No local pretrained weight loaded. Using random init.")
 
             in_dim = backbone.fc.in_features
             backbone.fc = nn.Identity()
-
             self.backbone = backbone
             self.proj = nn.Linear(in_dim, out_dim)
 
         elif backbone_type == "dinov2_local":
             if dino_repo_dir is None:
-                raise ValueError("dino_repo_dir must be provided when backbone_type='dinov2_local'")
+                raise ValueError("dino_repo_dir must be provided for dinov2_local.")
             if not os.path.isdir(dino_repo_dir):
                 raise ValueError(f"DINO repo dir not found: {dino_repo_dir}")
 
             if dino_repo_dir not in sys.path:
                 sys.path.insert(0, dino_repo_dir)
 
-            # model_name: dinov2_vits14 / dinov2_vitb14 / dinov2_vitl14
             try:
                 backbone = torch.hub.load(
                     dino_repo_dir,
@@ -85,7 +77,6 @@ class ImageEncoder(nn.Module):
                     pretrained=False
                 )
             except TypeError:
-                # 如果本地 hub entrypoint 不接受 pretrained=False
                 backbone = torch.hub.load(
                     dino_repo_dir,
                     model_name,
@@ -94,22 +85,18 @@ class ImageEncoder(nn.Module):
 
             if pretrained_path is not None and os.path.exists(pretrained_path):
                 checkpoint = torch.load(pretrained_path, map_location="cpu")
-                state_dict = extract_state_dict(checkpoint)
-                state_dict = clean_state_dict_keys(state_dict)
-
+                state_dict = clean_state_dict_keys(extract_state_dict(checkpoint))
                 missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
-                print(f"[ImageEncoder] Loaded DINOv2 local weights from: {pretrained_path}")
+                print(f"[ImageEncoder] Loaded DINOv2 weights from: {pretrained_path}")
                 print(f"[ImageEncoder] Missing keys: {missing}")
                 print(f"[ImageEncoder] Unexpected keys: {unexpected}")
-            else:
-                print("[ImageEncoder] No DINOv2 local pretrained weight loaded. Using hub/default init.")
 
             if hasattr(backbone, "embed_dim"):
                 in_dim = backbone.embed_dim
             elif hasattr(backbone, "num_features"):
                 in_dim = backbone.num_features
             else:
-                raise ValueError("Cannot infer output feature dim from DINOv2 backbone.")
+                raise ValueError("Cannot infer DINOv2 output feature dim.")
 
             self.backbone = backbone
             self.proj = nn.Linear(in_dim, out_dim)
@@ -129,17 +116,14 @@ class ImageEncoder(nn.Module):
 
     def forward(self, x):
         feat = self.backbone(x)
-        self._check_feat_shape(feat)
-        feat = self.proj(feat)
-        return feat
 
-    def _check_feat_shape(self, feat):
         if feat.ndim != 2:
             raise RuntimeError(
-                f"Expected backbone output shape [B, D], but got {tuple(feat.shape)}. "
-                "Please check whether your local DINOv2 hub model returns pooled features "
-                "or a token sequence in this repo version."
+                f"Expected backbone output [B, D], got {tuple(feat.shape)}."
             )
+
+        feat = self.proj(feat)
+        return feat
 
 
 class AttentionPooling(nn.Module):
@@ -171,9 +155,15 @@ class DefectClassifier(nn.Module):
         pretrained_path=None,
         feat_dim=256,
         num_classes=4,
-        dino_repo_dir=None
+        dino_repo_dir=None,
+        use_branch_gate=True,
+        branch_gate_mode="residual"
     ):
         super().__init__()
+
+        self.feat_dim = feat_dim
+        self.use_branch_gate = use_branch_gate
+        self.branch_gate_mode = branch_gate_mode
 
         self.encoder = ImageEncoder(
             backbone_type=backbone_type,
@@ -188,6 +178,13 @@ class DefectClassifier(nn.Module):
         self.global_pool = AttentionPooling(feat_dim=feat_dim)
 
         fusion_dim = feat_dim * 2
+
+        if self.use_branch_gate:
+            self.branch_gate = nn.Sequential(
+                nn.Linear(fusion_dim, feat_dim),
+                nn.ReLU(),
+                nn.Linear(feat_dim, 2)
+            )
 
         self.fusion = nn.Sequential(
             nn.Linear(fusion_dim, fusion_dim),
@@ -205,12 +202,68 @@ class DefectClassifier(nn.Module):
         feats = feats.view(B, N, -1)
         return feats
 
-    def forward(self, local_imgs, global_imgs, local_mask=None, global_mask=None):
+    def apply_branch_gate(self, local_pooled, global_pooled):
+        branch_input = torch.cat([local_pooled, global_pooled], dim=-1)
+
+        if not self.use_branch_gate:
+            branch_weights = torch.full(
+                (local_pooled.shape[0], 2),
+                0.5,
+                device=local_pooled.device,
+                dtype=local_pooled.dtype
+            )
+            return local_pooled, global_pooled, branch_weights
+
+        branch_logits = self.branch_gate(branch_input)
+        branch_weights = torch.softmax(branch_logits, dim=1)
+
+        local_w = branch_weights[:, 0:1]
+        global_w = branch_weights[:, 1:2]
+
+        if self.branch_gate_mode == "direct":
+            local_pooled = local_w * local_pooled
+            global_pooled = global_w * global_pooled
+
+        elif self.branch_gate_mode == "residual":
+            local_pooled = (0.5 + local_w) * local_pooled
+            global_pooled = (0.5 + global_w) * global_pooled
+
+        else:
+            raise ValueError(f"Unsupported branch_gate_mode: {self.branch_gate_mode}")
+
+        return local_pooled, global_pooled, branch_weights
+
+    def forward(
+        self,
+        local_imgs,
+        global_imgs,
+        local_mask=None,
+        global_mask=None,
+        ablation_mode="none"
+    ):
         local_feats = self.encode_views(local_imgs)
         global_feats = self.encode_views(global_imgs)
 
         local_pooled, local_attn = self.local_pool(local_feats, local_mask)
         global_pooled, global_attn = self.global_pool(global_feats, global_mask)
+
+        if ablation_mode == "none":
+            pass
+        elif ablation_mode == "no_local":
+            local_pooled = torch.zeros_like(local_pooled)
+        elif ablation_mode == "no_global":
+            global_pooled = torch.zeros_like(global_pooled)
+        elif ablation_mode == "local_only":
+            global_pooled = torch.zeros_like(global_pooled)
+        elif ablation_mode == "global_only":
+            local_pooled = torch.zeros_like(local_pooled)
+        else:
+            raise ValueError(f"Unsupported ablation_mode: {ablation_mode}")
+
+        local_pooled, global_pooled, branch_weights = self.apply_branch_gate(
+            local_pooled,
+            global_pooled
+        )
 
         fused = torch.cat([local_pooled, global_pooled], dim=-1)
         fused = self.fusion(fused)
@@ -223,5 +276,6 @@ class DefectClassifier(nn.Module):
             "hier_logits": hier_logits,
             "local_attn": local_attn,
             "global_attn": global_attn,
+            "branch_weights": branch_weights,
             "fused_feat": fused
         }
