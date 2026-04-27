@@ -1,19 +1,24 @@
 # Main change for this branch
-- Attention Figures add corresponding images + show more info
-- add sample ordering logics to `dataset.py`
+- Branch gate：branch-level attention，在 local feature 和 global feature 之間決定權重
   
 # Overview
-## 測試
+## 架構
 ```
-local_items, global_items = load_sample_meta(
-    sample_dir=sample_dir,
-    local_fov_threshold=LOCAL_FOV_THRESHOLD,
-    max_local=MAX_LOCAL_VIEWS,
-    max_global=MAX_GLOBAL_VIEWS
-)
+local images  ── encoder ── local attention pooling  ── local_feat
+                                                          │
+                                                          ├── branch gate ── local_weight
+                                                          │
+global images ─ encoder ── global attention pooling ── global_feat
+                                                          │
+                                                          └── branch gate ── global_weight
 
-print(sample_name)
-print("local:", [(x["image_name"], x["fov"]) for x in local_items])
-print("global:", [(x["image_name"], x["fov"]) for x in global_items])
+weighted_local = local_weight * local_feat
+weighted_global = global_weight * global_feat
+
+concat(weighted_local, weighted_global)
+        │
+fusion
+        │
+main head + hierarchical head
 ```
 
