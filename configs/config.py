@@ -1,12 +1,10 @@
 import os
 
-# ========= Dataset =========
 DATA_ROOT = "./dataset"
 TRAIN_DIR = os.path.join(DATA_ROOT, "train")
 VAL_DIR = os.path.join(DATA_ROOT, "val")
 TEST_DIR = os.path.join(DATA_ROOT, "test")
 
-# ========= Labels =========
 LABEL_MAP = {
     "Single": 0,
     "NP": 1,
@@ -15,8 +13,7 @@ LABEL_MAP = {
 }
 IDX2LABEL = {v: k for k, v in LABEL_MAP.items()}
 
-# ========= Image / Loader =========
-IMAGE_SIZE = 224
+IMAGE_SIZE = 518
 MAX_LOCAL_VIEWS = 6
 MAX_GLOBAL_VIEWS = 6
 LOCAL_FOV_THRESHOLD = 29
@@ -24,21 +21,11 @@ LOCAL_FOV_THRESHOLD = 29
 NUM_WORKERS = 4
 BATCH_SIZE = 8
 
-# ========= Model =========
-# 可選:
-#   "resnet50_local"
-#   "dinov2_local"
-#   "timm"
+# ========= Backbone =========
+# "resnet50_local" / "dinov2_local" / "timm"
 BACKBONE_TYPE = "dinov2_local"
-
-# 如果是 dinov2_local:
-# 可選: "dinov2_vits14" / "dinov2_vitb14" / "dinov2_vitl14"
 BACKBONE_NAME = "dinov2_vitb14"
-
-# 本地 official DINOv2 repo 路徑（完整下載的 repo 根目錄）
 DINO_REPO_DIR = "./third_party/dinov2"
-
-# 本地 checkpoint 路徑
 LOCAL_PRETRAINED_PATH = "./pretrained/dinov2_vitb14_pretrain.pth"
 
 FEAT_DIM = 256
@@ -55,46 +42,47 @@ USE_CLASS_WEIGHTS = True
 CLASS_WEIGHTS = [1.0, 2.0, 2.0, 1.5]
 
 # ========= Main Classification Loss =========
-# 可選: "ce" 或 "focal"
-CLS_LOSS_TYPE = "focal"
+CLS_LOSS_TYPE = "focal"   # "ce" or "focal"
 FOCAL_GAMMA = 2.0
 
 # ========= Hierarchical Head =========
 USE_HIERARCHICAL_HEAD = True
 HIER_LOSS_WEIGHT = 0.5
 GATE_LOSS_WEIGHT = 0.3
+INFER_PRED_HEAD = "main"  # "main" or "hier"
 
-# inference 時主預測使用哪個 head:
-# 可選: "main" 或 "hier"
-INFER_PRED_HEAD = "main"
+# ========= Branch Gate =========
+USE_BRANCH_GATE = True
+
+# "direct": local_w * local_feat, global_w * global_feat
+# "residual": (0.5 + local_w) * local_feat, (0.5 + global_w) * global_feat
+BRANCH_GATE_MODE = "residual"
+
+# entropy regularization:
+# 若啟用，會鼓勵 branch gate 不要太早 collapse 到單邊
+USE_BRANCH_ENTROPY_REG = False
+BRANCH_ENTROPY_WEIGHT = 0.01
 
 # ========= Scheduler =========
-# 可選: "none", "cosine", "step", "plateau"
-SCHEDULER_TYPE = "cosine"
+SCHEDULER_TYPE = "cosine"  # "none", "cosine", "step", "plateau"
 
-# for StepLR
 STEP_SIZE = 10
 STEP_GAMMA = 0.1
 
-# for ReduceLROnPlateau
 PLATEAU_MODE = "max"
 PLATEAU_FACTOR = 0.5
 PLATEAU_PATIENCE = 3
 
-# for CosineAnnealingLR
 COSINE_T_MAX = EPOCHS
 COSINE_ETA_MIN = 1e-6
 
-# ========= Save =========
 SAVE_DIR = "./checkpoints"
 BEST_MODEL_NAME = "best_model.pt"
 LAST_MODEL_NAME = "last_model.pt"
 
-# ========= Logging =========
 LOG_DIR = "./logs"
 TRAIN_LOG_CSV = os.path.join(LOG_DIR, "train_log.csv")
 
-# ========= Inference =========
 INFER_DIR = "./inference_outputs"
 TEST_PRED_CSV = os.path.join(INFER_DIR, "test_predictions.csv")
 TEST_CM_PNG = os.path.join(INFER_DIR, "test_confusion_matrix.png")
