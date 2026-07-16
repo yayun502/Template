@@ -1,0 +1,40 @@
+input_root: input_dataset
+output_root: wafer_edge_dataset
+
+# mask / yolo_bbox / labelme / coco / none
+annotation_format: labelme
+
+# detect / segment
+task: segment
+
+names:
+  - Lowfill
+  - Overfill
+  - Splash
+
+center_x: 2048
+center_y: 2048
+inner_radius: 1800
+outer_radius: 2020
+
+# 每張 wafer 幾何不同時填 JSON
+center_json: null
+
+unwrap_width: 8192
+unwrap_height: 256
+
+patch_width: 512
+stride: 384
+
+min_area: 8
+polygon_epsilon_ratio: 0.002
+
+negative_keep_ratio: 1.0
+seed: 42
+
+save_debug_images: true
+debug_max_per_split: 20
+
+coco_train_json: annotations/train.json
+coco_val_json: annotations/val.json
+coco_test_json: annotations/test.json

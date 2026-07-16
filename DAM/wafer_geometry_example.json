@@ -1,0 +1,15 @@
+{
+  "wafer_001": {
+    "center_x": 2048,
+    "center_y": 2048,
+    "inner_radius": 1800,
+    "outer_radius": 2020
+  },
+  "wafer_002.png": {
+    "center_x": 2045,
+    "center_y": 2050,
+    "wafer_radius": 2000,
+    "inner_margin": 200,
+    "outer_margin": 20
+  }
+}
